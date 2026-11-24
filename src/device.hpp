@@ -173,6 +173,13 @@ public:
 	// Program mode `m` on the lit HDMI pipe (modeset.hpp). On failure the
 	// previous timing is programmed back and an error returned.
 	IOReturn applyMode(const Modes::Mode &m);
+	IOReturn applyModeRaw(const Modes::Mode &m);
+	// rdna4-rot180 (=1, or debug.rdna4_rot180 at run time): the panel is mounted inverted and the pipe reads its scanout turned 180
+	// degrees (HUBP DCSURF_SURFACE_CONFIG.ROTATION_ANGLE), with the address every flip hands it kept for it (flip.cpp) and the
+	// cursor's image and place mirrored (cursor.cpp). Re-applied after every mode set, since that reprograms the plane.
+	bool panelRot180 { false };   // rdna4-rot180: the screen read turned 180 degrees and the cursor with it
+	bool panelRotLogged { false };
+	bool applyPanelRotation();
 	// rdna4-boot4k: the boot display behind a passive DP++ adapter, which the
 	// firmware lights at what the adapter carries (2560x1440), taken over by a
 	// head's pipe that lights its connector at 3840x2160 in YCbCr 4:2:0, as

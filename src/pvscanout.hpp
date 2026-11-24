@@ -99,6 +99,13 @@ bool wantsMode(uint32_t port, uint32_t width, uint32_t height);
 bool head(uint32_t port, Head &out);
 
 /*
+ * The scanout of head `port` turned by rdna4-rot180 (`degrees`: 0 or 180; `variant`: 1 the first pixel, 2 the last pixel, 3 the
+ * last row): the display host hands it to the runtime before it flips (pvgpu.cpp), because the write a boot makes is latched away
+ * by the mode set that follows it. False when the head is not turned (plugin.cpp, device.cpp).
+ */
+bool panelRotation(uint32_t port, uint32_t &degrees, uint32_t &variant);
+
+/*
  * SubmitTransaction {u32 port, u32 surface, u32 task}: the surface, an
  * IOSurface ID, into head `port`'s scanout (pvscanout.cpp).
  */

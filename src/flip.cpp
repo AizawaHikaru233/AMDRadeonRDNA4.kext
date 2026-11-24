@@ -42,6 +42,10 @@ constexpr uint32_t kHubpFlipPending = 1u << 8;
 constexpr uint32_t kHubpFlipType = 1u << 1;
 constexpr uint32_t kHubpStereoMode = 3u << 12;
 constexpr uint32_t kHubpStereoIn = 1u << 16;
+// regHUBPREQ0_DCSURF_SURFACE_CONFIG, BASE_IDX 2: ROTATION_ANGLE [9:8] (0, 1, 2, 3 = 0, 90, 180, 270 degrees the plane reads its
+// surface turned), H_MIRROR_EN [10].
+constexpr uint32_t kHubpSurfaceConfig = 0x05e5;
+constexpr uint32_t kRotationMask = 0x300;
 // regOTG0_OTG_STATUS_POSITION and regOTG0_OTG_MASTER_UPDATE_LOCK, BASE_IDX 2.
 constexpr uint32_t kOtgStatusPosition = 0x1b4a;
 constexpr uint32_t kOtgMasterUpdateLock = 0x1b89;
@@ -50,7 +54,77 @@ constexpr uint32_t kMpccTopSel = 0x0000;
 constexpr uint32_t kMpccOppId = 0x0002;
 constexpr uint32_t kMaxAddressBytes = 0xffffffffu;
 
+// A HUBP's rotation: the angle the OS asked for and the scanout size the address a turned read starts at is worked out from.
+struct ScanoutRotation {
+	uint32_t degrees { 0 };
+	uint32_t variant { 0 };           // 2: the last pixel, 3: the last row's first (PanelRot's mode, passed in)
+	uint32_t pitch { 0 };             // bytes a row
+	uint32_t width { 0 }, height { 0 };
+};
+ScanoutRotation gRotation[Pipe::kMaxOtg];
+
+uint32_t angleBits(uint32_t degrees) {
+	return degrees == 90 ? 1u : degrees == 180 ? 2u : degrees == 270 ? 3u : 0u;
+}
+
 } // namespace
+
+// (privately) the bytes a turned read's start address is past the surface's first pixel, for the mode in force.
+uint64_t addressOffset(uint8_t hubp) {
+	if (hubp >= Pipe::kMaxOtg)
+		return 0;
+	const ScanoutRotation &r = gRotation[hubp];
+
+	if (r.degrees != 180)
+		return 0;
+
+	const uint64_t lastRow = r.height ? static_cast<uint64_t>(r.pitch) * (r.height - 1) : 0;
+
+	switch (r.variant) {
+	case 2: return lastRow + (r.width ? static_cast<uint64_t>(r.width - 1) * 4 : 0);
+	case 3: return lastRow;
+	default: return 0;
+	}
+}
+
+uint32_t rotation(uint8_t hubp) {
+	return hubp < Pipe::kMaxOtg ? gRotation[hubp].degrees : 0;
+}
+
+uint32_t surfaceConfig(RDNA4Compute &compute, uint8_t hubp) {
+	if (hubp >= Pipe::kMaxOtg)
+		return kBad;
+
+	return compute.rd(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpSurfaceConfig + static_cast<uint32_t>(hubp) * Pipe::Reg::kHubpStride });
+}
+
+bool setRotation(RDNA4Compute &compute, uint8_t hubp, uint32_t degrees, uint32_t variant, uint32_t pitch, uint32_t width,
+                 uint32_t height) {
+	if (hubp >= Pipe::kMaxOtg)
+		return false;
+
+	const uint32_t base = static_cast<uint32_t>(hubp) * Pipe::Reg::kHubpStride;
+	const uint32_t image = compute.rd(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpSurfaceConfig + base });
+
+	if (image == kBad)
+		return false;
+
+	const uint32_t want = (image & ~kRotationMask) | (angleBits(degrees) << 8);
+
+	if (want != image)
+		compute.wr(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpSurfaceConfig + base }, want);
+
+	ScanoutRotation &r = gRotation[hubp];
+
+	if (r.degrees != degrees || r.variant != variant || r.pitch != pitch || r.width != width || r.height != height) {
+		r = ScanoutRotation { degrees, variant, pitch, width, height };
+		FLOG("HUBP%u: scanout turned %u degrees (DCSURF_SURFACE_CONFIG 0x%08x -> 0x%08x), %ux%u at %u bytes a row: flips from %s",
+		     hubp, degrees, image, want, width, height, pitch,
+		     variant == 2 ? "the last pixel" : variant == 3 ? "the last row" : "the first pixel");
+	}
+
+	return true;
+}
 
 bool findPipe(RDNA4Compute &compute, Surface &out, bool log) {
 	auto dmuRead = [&](uint8_t segment, uint32_t dword) {
@@ -328,7 +402,8 @@ uint8_t hubpShowing(RDNA4Compute &compute, uint64_t mc) {
 		const uint32_t lo = compute.rd(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpAddressLo + base });
 		const uint32_t hi = compute.rd(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpAddressHi + base });
 
-		if (lo != kBad && hi != kBad && (static_cast<uint64_t>(lo) | static_cast<uint64_t>(hi) << 32) == mc)
+		// a turned scanout's register holds the surface's address plus the offset (addressOffset)
+		if (lo != kBad && hi != kBad && (static_cast<uint64_t>(lo) | static_cast<uint64_t>(hi) << 32) == mc + addressOffset(i))
 			return i;
 	}
 
@@ -345,8 +420,26 @@ bool request(RDNA4Compute &compute, uint8_t hubp, uint64_t mc) {
 	if (control & (kHubpFlipType | kHubpStereoMode | kHubpStereoIn))   // at vblank, not at once
 		compute.wr(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpFlipControl + base }, control & ~(kHubpFlipType | kHubpStereoMode | kHubpStereoIn));
 
-	compute.wr(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpAddressHi + base }, addressHi(mc));
-	compute.wr(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpAddressLo + base }, addressLo(mc));
+	// A turned scanout: the angle goes with every address (the plane's own programming latches DCSURF_SURFACE_CONFIG back to the
+	// value it holds, so a write at mode-set time alone does not hold), and the address is the one the turned read starts at.
+	if (rotation(hubp)) {
+		const uint32_t image = compute.rd(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpSurfaceConfig + base });
+		const uint32_t bits = angleBits(rotation(hubp)) << 8;
+
+		// unconditional: the plane's own programming latches the field back, and one write a flip costs nothing
+		if (image != kBad)
+			compute.wr(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpSurfaceConfig + base }, (image & ~kRotationMask) | bits);
+		static uint32_t seen;   // (diagnostic) what the field held before the write, the first few flips
+		if (seen < 8 && image != kBad) {
+			seen++;
+			FLOG("HUBP%u: flip: DCSURF_SURFACE_CONFIG 0x%08x (angle %u) -> %u", hubp, image, (image >> 8) & 3, angleBits(rotation(hubp)));
+		}
+	}
+
+	const uint64_t at = mc + addressOffset(hubp);
+
+	compute.wr(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpAddressHi + base }, addressHi(at));
+	compute.wr(IpDiscovery::HwDmu, GfxReg::Reg { 2, kHubpAddressLo + base }, addressLo(at));
 
 	return true;
 }
@@ -361,8 +454,13 @@ bool shown(RDNA4Compute &compute, uint8_t hubp, uint64_t &requested, uint64_t &i
 	if (hubp >= Pipe::kMaxOtg || lo == kBad || hi == kBad || useLo == kBad || useHi == kBad)
 		return false;
 
-	requested = static_cast<uint64_t>(lo) | static_cast<uint64_t>(hi) << 32;
-	inUse = static_cast<uint64_t>(useLo) | static_cast<uint64_t>(useHi) << 32;
+	// the register holds the turned read's start address; callers deal in the surface's own
+	const uint64_t offset = addressOffset(hubp);
+
+	requested = (static_cast<uint64_t>(lo) | static_cast<uint64_t>(hi) << 32);
+	inUse = (static_cast<uint64_t>(useLo) | static_cast<uint64_t>(useHi) << 32);
+	requested = requested >= offset ? requested - offset : requested;
+	inUse = inUse >= offset ? inUse - offset : inUse;
 
 	return true;
 }

@@ -1578,13 +1578,20 @@ IOReturn RDNA4Device::loadCursorStage(uint32_t w, uint32_t h, uint32_t hotX, uin
 	}
 	for (uint32_t i = 0; i < kCursorWidth * kCursorHeight; i++)
 		slot[i] = 0;
+	// A scanout read turned 180 degrees (rdna4-rot180) mirrors the picture; the sprite plane is not turned with it, so its image is
+	// turned here and its corner is mirrored where it is drawn (drawHardwareCursor).
+	const bool turned = panelRot180;
 	for (uint32_t y = 0; y < cursorHeight; y++)
-		for (uint32_t x = 0; x < cursorWidth; x++)
-			slot[y * kCursorPitch + x] = cursorStage[y * cursorWidth + x];
+		for (uint32_t x = 0; x < cursorWidth; x++) {
+			const uint32_t dy = turned ? cursorHeight - 1 - y : y, dx = turned ? cursorWidth - 1 - x : x;
+
+			slot[dy * kCursorPitch + dx] = cursorStage[y * cursorWidth + x];
+		}
 	// Data path check: the most opaque pixel must read back from VRAM. A
 	// fully transparent conversion (max alpha 0) or a mismatch explains an
 	// invisible sprite without any register being wrong.
-	const uint32_t rbIdx = (opaqueIdx / cursorWidth) * kCursorPitch + (opaqueIdx % cursorWidth);
+	const uint32_t rbIdx = (turned ? (cursorHeight - 1 - opaqueIdx / cursorWidth) : (opaqueIdx / cursorWidth)) * kCursorPitch +
+	                       (turned ? cursorWidth - 1 - opaqueIdx % cursorWidth : opaqueIdx % cursorWidth);
 	cursorNote("image %ux%u hot %u,%u: max alpha 0x%02x stage[%u]=0x%08x vram=0x%08x %s",
 	           cursorWidth, cursorHeight, hotX, hotY, maxAlpha, opaqueIdx,
 	           cursorStage[opaqueIdx], slot[rbIdx],
@@ -1612,6 +1619,20 @@ IOReturn RDNA4Device::drawHardwareCursor(int32_t x, int32_t y, uint32_t visible)
 		if (++cursorHeldCalls <= 3)
 			cursorNote("self-test: cscDrawHardwareCursor #%u (%d,%d visible %u) ignored", cursorHeldCalls, x, y, visible);
 		return kIOReturnSuccess;
+	}
+	// A scanout read turned 180 degrees: the picture is mirrored, and so is the sprite's place on it (its image was turned at
+	// upload, and the hot spot kept is the original one, so cursorMove's hot-spot to corner step is unchanged).
+	if (panelRot180 && cursorWidth && cursorHeight) {
+		uint32_t wide = 0, high = 0;
+
+		if (!liveSize(wide, high)) {
+			wide = fbWidth;
+			high = fbHeight;
+		}
+		if (wide && high) {
+			x = static_cast<int32_t>(wide) - x - static_cast<int32_t>(cursorWidth);
+			y = static_cast<int32_t>(high) - y - static_cast<int32_t>(cursorHeight);
+		}
 	}
 	hwCursorX = x;
 	hwCursorY = y;

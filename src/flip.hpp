@@ -72,6 +72,22 @@ bool request(RDNA4Compute &compute, uint8_t hubp, uint64_t mc);
 // once the request latched. False when they cannot be read.
 bool shown(RDNA4Compute &compute, uint8_t hubp, uint64_t &requested, uint64_t &inUse);
 
+// The scanout of HUBP `hubp` read turned by `degrees` (0 or 180 here), and which address such a read starts at (`variant`: 0 the
+// surface's first pixel, 2 its last pixel, 3 the last row's first) -- rdna4-rot180 says, device.cpp passes it. `pitch` (bytes a
+// row), `width` and `height` are the scanout's. Everything that hands the HUBP an address (request) or compares one (shown,
+// hubpShowing) goes through the offset this keeps, so a caller never has to know about it. The angle is written with every flip:
+// a write made once (at boot, at a mode set) is latched away by the plane's own programming.
+bool setRotation(RDNA4Compute &compute, uint8_t hubp, uint32_t degrees, uint32_t variant, uint32_t pitch, uint32_t width,
+                 uint32_t height);
+uint32_t rotation(uint8_t hubp);
+// DCSURF_SURFACE_CONFIG as the HUBP reads it now (ROTATION_ANGLE [9:8], H_MIRROR_EN [10]); 0xffffffff when unreadable. The
+// register is double buffered, so this is how to tell whether the angle a flip wrote is the one latched.
+uint32_t surfaceConfig(RDNA4Compute &compute, uint8_t hubp);
+
+// Where a turned scanout's read starts, in bytes past the surface's first pixel (`variant` of setRotation): 1 the first pixel (as
+// Linux DC programs a 180-degree plane, and the one verified on this card), 2 the last pixel, 3 the last row's first.
+uint64_t addressOffset(uint8_t hubp);
+
 // Whether HUBP `hubp` ran out of data since the last call (DCHUBP_CNTL.HUBP_UNDERFLOW_STATUS, sticky; cleared here): its picture then
 // shows lines of garbage or of the frame before.
 bool underflowed(RDNA4Compute &compute, uint8_t hubp);

@@ -2524,6 +2524,18 @@ bool PvScanout::cursorMove(uint32_t port, int32_t x, int32_t y, bool visible)
 	});
 }
 
+// rdna4-rot180 as the device holds it: the display host pushes it into the runtime (pvgpu.cpp setUpFlips), since a header's inline
+// variable is not shared across this kext's translation units (checked on the card, 2026-11-25).
+bool PvScanout::panelRotation(uint32_t port, uint32_t &degrees, uint32_t &variant)
+{
+	if (port != 0 || !bootState || !bootState->dev.panelRot180)
+		return false;
+
+	degrees = 180;
+	variant = 1;   // the surface's first pixel (device.cpp's PanelRot::kAddressVariant)
+	return true;
+}
+
 bool PvScanout::head(uint32_t port, Head &out)
 {
 	if (port == 0 && pvBootHead) {

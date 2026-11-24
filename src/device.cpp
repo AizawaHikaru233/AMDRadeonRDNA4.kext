@@ -17,6 +17,9 @@
 #include "dpdual.hpp"
 #include "dcninit.hpp"
 #include "compute.hpp"
+#include "panelrot.hpp"
+// debug.rdna4_rot180's oid (its SYSCTL_PROC is at applyPanelRotation's; init registers it here, earlier in the file)
+extern struct sysctl_oid sysctl__debug_rdna4_rot180;
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOMessage.h>
@@ -2576,6 +2579,12 @@ bool RDNA4Device::init(IOPCIDevice *pci, IOService *ownerService) {
 	isAmd = (vd & 0xffff) == 0x1002;
 	uint32_t cursor = 0;
 	ndrvCursorRequested = PE_parse_boot_argn("rdna4-cursor", &cursor, sizeof(cursor)) && cursor != 0;
+	// rdna4-rot180=1: the panel is mounted inverted; the pipe reads its scanout turned 180 degrees.
+	uint32_t rot180 = 0;
+	panelRot180 = PE_parse_boot_argn("rdna4-rot180", &rot180, sizeof(rot180)) && rot180 != 0;
+	PanelRot::enabled = panelRot180;
+	if (panelRot180)
+		FBLOG("rot180: panel mounted inverted: the scanout is read turned 180 degrees, the cursor with it (rdna4-rot180=1)");
 	// The plane for the paravirtual displays' cursor (PvScanout::cursorReady), without rdna4-cursor's NDRV routes: on where the paravirtual
 	// GPU is built in (card-verified 2026-11-19: one arrow per display, Safari's box around the pointer gone), rdna4-pvcursor=0 turns it off.
 #ifdef AMDRadeonRDNA4_PVGPU
@@ -2658,6 +2667,7 @@ bool RDNA4Device::init(IOPCIDevice *pci, IOService *ownerService) {
 	if (!gSleepTestDev && rmmio) {
 		gSleepTestDev = this;
 		sysctl_register_oid(&sysctl__debug_rdna4_head2sleep);
+		sysctl_register_oid(&sysctl__debug_rdna4_rot180);
 	}
 	if (systemSleepWanted() && !sleepWakeNotifier) {
 		if (rmmio && pipe.valid() && !coldBoot)   // what a cold start after the wake compares against
@@ -2670,6 +2680,7 @@ bool RDNA4Device::init(IOPCIDevice *pci, IOService *ownerService) {
 		      sleepWakeNotifier ? "registered" : "NOT registered", pciPowerNotifier ? "watched" : "NOT watched");
 		logPciState("boot");
 	}
+	applyPanelRotation();   // rdna4-rot180: the scanout of the pipe the firmware lit is read turned
 	FBLOG("init: device ready (%ux%u console, %lu mode(s))", fbWidth, fbHeight,
 	      static_cast<unsigned long>(modeCount));
 	return true;
@@ -3467,7 +3478,86 @@ bool RDNA4Device::bootPipeTarget(ModeSet::Target &t) {
 	return true;
 }
 
+// Every mode set reprograms the HUBP (and clears the angle), so the turn is re-applied around it.
 IOReturn RDNA4Device::applyMode(const Modes::Mode &m) {
+	const IOReturn ret = applyModeRaw(m);
+
+	applyPanelRotation();
+	return ret;
+}
+
+// The device debug.rdna4_rot180 acts on.
+static RDNA4Device *gPanelRotDevice;
+
+// debug.rdna4_rot180: rdna4-rot180 at run time (the same one option: the screen and the cursor follow it, the next flip applies it).
+static int panelRotSysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int value = gPanelRotDevice && gPanelRotDevice->panelRot180 ? 1 : 0;
+	int err = sysctl_handle_int(oidp, &value, 0, req);
+
+	if (err || !req->newptr)
+		return err;
+	if (value < 0 || value > 1)
+		return EINVAL;
+
+	PanelRot::enabled = value != 0;
+
+	if (gPanelRotDevice) {
+		gPanelRotDevice->panelRot180 = value != 0;
+		gPanelRotDevice->applyPanelRotation();
+	}
+	return 0;
+}
+
+SYSCTL_PROC(_debug, OID_AUTO, rdna4_rot180, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, panelRotSysctl, "I",
+            "AMDRadeonRDNA4: rdna4-rot180: a panel mounted inverted: 0 off (default), 1 the screen read turned 180 degrees and the cursor with it");
+
+// rdna4-rot180: the plane reads its scanout turned 180 degrees, and every flip keeps the angle and hands the HUBP the address such
+// a read starts at (flip.cpp keeps both per HUBP, so nothing else has to know). The runtime does it when it is up; without one
+// (rdna4-compute=0: nothing flips on the card) the register alone.
+bool RDNA4Device::applyPanelRotation() {
+	gPanelRotDevice = this;
+	if (!panelRot180)
+		return false;
+	if (!rmmio || !ipDiscovery.isValid() || pipe.hubp >= Pipe::kMaxOtg)
+		return false;
+
+	const uint32_t degrees = panelRot180 ? 180u : 0u;
+	const uint32_t variant = PanelRot::kAddressVariant;
+	const uint32_t width = pipe.viewportW ? pipe.viewportW : liveTiming.hActive;
+	const uint32_t height = pipe.viewportH ? pipe.viewportH : liveTiming.vActive;
+	const uint32_t pitch = (pipe.pitchPx ? pipe.pitchPx : width) * 4;
+
+	if (compute)
+		compute->rtScanoutSetRotation(pipe.hubp, degrees, variant, pitch, width, height);
+	else {
+		// no runtime (rdna4-compute=0: nothing flips on the card then): the register alone
+		constexpr uint32_t kAngleMask = 3u << 8;
+		const uint32_t cfg = regReadDmu(2, 0x05e5 + hubpOff());
+
+		if (cfg == 0xffffffffu) {
+			FBLOG("rot180: HUBP%u surface config unreadable (0x%08x)", pipe.hubp, cfg);
+			return false;
+		}
+
+		const uint32_t want = (cfg & ~kAngleMask) | (degrees == 180 ? 2u << 8 : 0u);
+
+		if (want != cfg && !regWriteDmu(2, 0x05e5 + hubpOff(), want))
+			return false;
+	}
+
+	if (owner)
+		owner->setProperty("AMDRadeonRDNA4,PanelRotation", static_cast<uint64_t>(degrees), 32);
+	if (!panelRotLogged) {
+		panelRotLogged = true;
+		FBLOG("rot180: HUBP%u scanout %u deg: %ux%u at %u bytes a row, the cursor and every flip follow",
+		      pipe.hubp, degrees, width, height, pitch);
+	}
+	return true;
+}
+
+IOReturn RDNA4Device::applyModeRaw(const Modes::Mode &m) {
 	if (bootReleased) {
 		FBLOG("modes: switch to id %u refused: the boot pipe is released, its connector is a head's", m.id);
 		return kIOReturnUnsupported;

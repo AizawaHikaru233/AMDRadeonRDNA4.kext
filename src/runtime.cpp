@@ -2871,6 +2871,25 @@ bool RDNA4Compute::rtScanoutFlip(uint8_t hubp, uint64_t mc) {
 	return Flip::request(*this, hubp, mc);
 }
 
+bool RDNA4Compute::rtScanoutSetRotation(uint8_t hubp, uint32_t degrees, uint32_t variant, uint32_t pitch, uint32_t width,
+                                        uint32_t height) {
+	Locked g(rtLock);
+
+	return Flip::setRotation(*this, hubp, degrees, variant, pitch, width, height);
+}
+
+uint32_t RDNA4Compute::rtScanoutRotation(uint8_t hubp) {
+	Locked g(rtLock);
+
+	return Flip::rotation(hubp);
+}
+
+uint32_t RDNA4Compute::rtScanoutSurfaceConfig(uint8_t hubp) {
+	Locked g(rtLock);
+
+	return Flip::surfaceConfig(*this, hubp);
+}
+
 bool RDNA4Compute::rtScanoutShown(uint8_t hubp, uint64_t &requested, uint64_t &inUse) {
 	Locked g(rtLock);
 

@@ -8797,6 +8797,16 @@ void RDNA4PvHost::setUpFlips(ScanoutMap &sm, uint32_t port)
 			sm.mc[k + 1] = 0;
 	}
 
+	// rdna4-rot180 (device.cpp): the runtime keeps the angle every flip has to write and the address a turned read starts at. The
+	// device's own write at boot is latched away by the mode set that follows it, so it is handed over here, before the first flip.
+	{
+		uint32_t degrees = 0, variant = 0;
+		PvScanout::Head turned;
+
+		if (PvScanout::panelRotation(port, degrees, variant) && PvScanout::head(port, turned))
+			gCompute->rtScanoutSetRotation(hubp, degrees, variant, turned.pitch, turned.width, turned.height);
+	}
+
 	sm.flips = sm.mc[1] && sm.mc[2];
 	pvlog("host: present: port %u: HUBP%u (OTG%u) reads its scanout at MC 0x%llx; frames %s", port, hubp, sm.otg, mc,
 	      sm.flips ? "flipped at vblank between it and two buffers of ours" : "copied into it (no VRAM for flipping)");
@@ -8811,7 +8821,8 @@ uint32_t RDNA4PvHost::flipTarget(ScanoutMap &sm)
 	if (sm.queued)
 		return sm.queued - 1u;
 
-	if (!gCompute->rtScanoutShown(sm.hubp, requested, inUse) || (requested != sm.mc[0] && requested != sm.mc[1] && requested != sm.mc[2])) {
+	if (!gCompute->rtScanoutShown(sm.hubp, requested, inUse) ||
+	    (requested != sm.mc[0] && requested != sm.mc[1] && requested != sm.mc[2] && !gCompute->rtScanoutRotation(sm.hubp))) {
 		pvlog("host: present: HUBP%u shows 0x%llx, none of the port's buffers: frames copied into the scanout again", sm.hubp, requested);
 		sm.flips = false;
 

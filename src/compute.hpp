@@ -225,6 +225,9 @@ private:
 	friend uint8_t Flip::hubpShowing(RDNA4Compute &compute, uint64_t mc);
 	friend bool Flip::request(RDNA4Compute &compute, uint8_t hubp, uint64_t mc);
 	friend bool Flip::shown(RDNA4Compute &compute, uint8_t hubp, uint64_t &requested, uint64_t &inUse);
+	friend bool Flip::setRotation(RDNA4Compute &compute, uint8_t hubp, uint32_t degrees, uint32_t variant, uint32_t pitch,
+	                            uint32_t width, uint32_t height);
+	friend uint32_t Flip::surfaceConfig(RDNA4Compute &compute, uint8_t hubp);
 	friend bool Flip::underflowed(RDNA4Compute &compute, uint8_t hubp);
 	friend uint8_t Flip::otgOf(RDNA4Compute &compute, uint8_t hubp);
 	friend bool Flip::scan(RDNA4Compute &compute, uint8_t otg, uint32_t &line, uint32_t &lines, uint32_t &blankStart);
@@ -766,6 +769,11 @@ public:
 	bool rtScanoutHubp(uint64_t barPhys, uint8_t &hubp, uint64_t &mc);
 	uint64_t rtBufferMc(const void *owner, uint64_t handle);
 	bool rtScanoutFlip(uint8_t hubp, uint64_t mc);
+	// The scanout read turned by degrees (a display rotated in the OS: the NDRV's cscSetScaler, device.cpp); the geometry is the
+	// scanout's, for the address a turned read starts at (Flip::setRotation). Everything that flips goes through it.
+	bool rtScanoutSetRotation(uint8_t hubp, uint32_t degrees, uint32_t variant, uint32_t pitch, uint32_t width, uint32_t height);
+	uint32_t rtScanoutRotation(uint8_t hubp);
+	uint32_t rtScanoutSurfaceConfig(uint8_t hubp);
 	bool rtScanoutShown(uint8_t hubp, uint64_t &requested, uint64_t &inUse);
 	bool rtScanoutUnderflowed(uint8_t hubp);
 	uint8_t rtScanoutOtg(uint8_t hubp);
