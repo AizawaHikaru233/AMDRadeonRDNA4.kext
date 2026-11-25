@@ -1304,7 +1304,10 @@ void RDNA4Accel::waitForWindowServer()
 	bool runtime = false;
 	if (gFamilyClients) {
 		OSDictionary *match = IOService::serviceMatching(RDNA4_COMPUTE_SERVICE);
-		IOService *svc = match ? IOService::waitForMatchingService(match, 30ull * kSecondScale) : nullptr;
+		// 120 s, not 30: on this machine the runtime's bring-up (PSP/SMU/GC firmware, stage self-tests, DMA) came up after
+		// the 30 s deadline on several boots of 2026-11-25, and an accelerator published without it is what makes
+		// CoreDisplay abort (see the comment above). The gate must wait for the service, not race it.
+		IOService *svc = match ? IOService::waitForMatchingService(match, 120ull * kSecondScale) : nullptr;
 		runtime = svc;
 		OSSafeReleaseNULL(svc);
 		OSSafeReleaseNULL(match);
@@ -1351,7 +1354,7 @@ void RDNA4Accel::waitForWindowServer()
 	}
 	rdna4Log("AMDRadeonRDNA4: accel: WindowServer let go (%s): the wrangler %s us after %u ms; %u framebuffer(s) lit, %u bare hidden; "
 	         "runtime %s\n", gFamilyClients ? "registered" : "NOT registered", wranglerHasUs() ? "has" : "does NOT have", waited, lit, gBareCount,
-	         runtime ? "up" : "NOT up after 30 s");
+	         runtime ? "up" : "NOT up after 120 s");
 }
 
 void RDNA4Accel::start()
