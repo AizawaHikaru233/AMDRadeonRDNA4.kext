@@ -20,6 +20,8 @@
 #include "panelrot.hpp"
 // debug.rdna4_rot180's oid (its SYSCTL_PROC is at applyPanelRotation's; init registers it here, earlier in the file)
 extern struct sysctl_oid sysctl__debug_rdna4_rot180;
+// debug.rdna4_hdr's oid (its SYSCTL_PROC is at the HDR section further down; init registers it with rot180's)
+extern struct sysctl_oid sysctl__debug_rdna4_hdr;
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOMessage.h>
@@ -30,6 +32,14 @@ extern struct sysctl_oid sysctl__debug_rdna4_rot180;
 #include "buildrev.h"   // AMDRADEONRDNA4_BUILD, written by the Makefile
 
 #define FBLOG(fmt, ...)  rdna4Log("AMDRadeonRDNA4: " fmt "\n", ## __VA_ARGS__)
+
+// rdna4-hdr=1 / debug.rdna4_hdr (docs/hdr-a8-mode-colour.md): the mode table's HDR10 variants and whether the
+// getTimingInfoForDisplayMode hook is in place for their colour fields. One GPU a boot answers for, so these are the
+// boot's.
+bool RDNA4Device::hdrModes { false };
+bool RDNA4Device::hdrTimingHook { false };
+// The device debug.rdna4_hdr acts on (set where the sysctl is registered).
+static RDNA4Device *gHdrDevice;
 
 // ---------------------------------------------------------------------------
 // Console framebuffer discovery
@@ -2586,6 +2596,15 @@ bool RDNA4Device::init(IOPCIDevice *pci, IOService *ownerService) {
 	PanelRot::enabled = panelRot180;
 	if (panelRot180)
 		FBLOG("rot180: panel mounted inverted: the scanout is read turned 180 degrees, the cursor with it (rdna4-rot180=1)");
+	// rdna4-hdr=1: the mode table also offers the modes' HDR10 variants (A8, docs/hdr-a8-mode-colour.md). Assigned only
+	// when the boot arg is there, so a run-time debug.rdna4_hdr=1 is not reset by a later device. Without the colour
+	// hook the option is not taken (the route's own failure line said why): an HDR10 mode that cannot carry its colour
+	// is a duplicate of its SDR original.
+	uint32_t hdr = 0;
+	if (PE_parse_boot_argn("rdna4-hdr", &hdr, sizeof(hdr)))
+		hdrModes = hdr != 0 && hdrTimingHook;
+	if (hdrModes)
+		FBLOG("hdr: rdna4-hdr=1: the mode table also offers the modes' HDR10 variants");
 	// The plane for the paravirtual displays' cursor (PvScanout::cursorReady), without rdna4-cursor's NDRV routes: on where the paravirtual
 	// GPU is built in (card-verified 2026-11-19: one arrow per display, Safari's box around the pointer gone), rdna4-pvcursor=0 turns it off.
 #ifdef AMDRadeonRDNA4_PVGPU
@@ -2667,8 +2686,10 @@ bool RDNA4Device::init(IOPCIDevice *pci, IOService *ownerService) {
 	}
 	if (!gSleepTestDev && rmmio) {
 		gSleepTestDev = this;
+		gHdrDevice = this;
 		sysctl_register_oid(&sysctl__debug_rdna4_head2sleep);
 		sysctl_register_oid(&sysctl__debug_rdna4_rot180);
+		sysctl_register_oid(&sysctl__debug_rdna4_hdr);
 	}
 	if (systemSleepWanted() && !sleepWakeNotifier) {
 		if (rmmio && pipe.valid() && !coldBoot)   // what a cold start after the wake compares against
@@ -2832,11 +2853,15 @@ void RDNA4Device::buildModeTable() {
 	currentModeId = defaultModeId = modeTable[bootIdx].id;
 	liveTiming = modeTable[bootIdx].t;
 	liveTimingValid = bootTimingValid;
+	// A8: the HDR10 variants go after the SDR table (room permitting, and only once the colour hook is in place), so
+	// every ID macOS already holds keeps its meaning and the new ones are logged with the rest below.
+	if (hdrModes)
+		offerHdrModes();
 	for (size_t i = 0; i < modeCount; i++) {
 		const Modes::Mode &m = modeTable[i];
-		FBLOG("modes: id %u %ux%u@%u.%03u %u kHz%s%s", m.id, m.t.hActive, m.t.vActive,
+		FBLOG("modes: id %u %ux%u@%u.%03u %u kHz%s%s%s", m.id, m.t.hActive, m.t.vActive,
 		      m.refreshMilliHz / 1000, m.refreshMilliHz % 1000, m.t.pixelClockKHz,
-		      m.native ? " native" : "", m.id == currentModeId ? " (live)" : "");
+		      m.native ? " native" : "", m.hdr10 ? " HDR10" : "", m.id == currentModeId ? " (live)" : "");
 	}
 	FBLOG("modes: %lu mode(s), switching %s", static_cast<unsigned long>(modeCount),
 	      modesetRequested ? "on (rdna4-modeset=0 turns it off)" : "off (rdna4-modeset=0: boot mode only)");
@@ -2846,6 +2871,87 @@ void RDNA4Device::buildModeTable() {
 		FBLOG("modes: plane blank end: the firmware has 0x%08x, the rule gives 0x%08x for the boot timing",
 		      regReadDmu(2, 0x063b + hubpOff()), ModeSet::dlgBlankEnd(bootTiming));
 	owner->setProperty("Modes,Count", static_cast<uint64_t>(modeCount), 32);
+}
+
+// rdna4-hdr=1 (debug.rdna4_hdr at run time): append one HDR10 copy of every SDR mode the table holds — same raster and
+// refresh, an ID of its own, native cleared — under Modes::MaxModes, which the table shares with macOS. The colour
+// fields themselves are written by plugin.cpp's getTimingInfoForDisplayMode hook (hdrTimingHook); without it no copy is
+// offered at all, because a copy macOS could not tell from its SDR original is a duplicate in the Displays pane.
+// Returns the number appended.
+size_t RDNA4Device::offerHdrModes() {
+	if (!hdrModes || !hdrTimingHook || !modeCount)
+		return 0;
+
+	const size_t base = modeCount;
+	size_t candidates = 0;
+	uint32_t nextId = 1;
+	for (size_t i = 0; i < base; i++) {
+		if (modeTable[i].id >= nextId)
+			nextId = modeTable[i].id + 1;
+		if (!modeTable[i].hdr10)
+			candidates++;
+	}
+	if (!candidates)
+		return 0;
+
+	size_t added = 0;
+	for (size_t i = 0; i < base && modeCount < Modes::MaxModes; i++) {
+		if (modeTable[i].hdr10)
+			continue;
+		Modes::Mode m = modeTable[i];
+		m.id = nextId++;
+		m.native = false;
+		m.hdr10 = true;
+		modeTable[modeCount++] = m;
+		added++;
+	}
+
+	if (owner)
+		owner->setProperty("Modes,Count", static_cast<uint64_t>(modeCount), 32);
+	if (!added)
+		FBLOG("hdr: no room for an HDR10 variant: the table already holds %lu mode(s) (Modes::MaxModes is %lu)",
+		      static_cast<unsigned long>(modeCount), static_cast<unsigned long>(Modes::MaxModes));
+	else if (added < candidates)
+		FBLOG("hdr: %lu HDR10 mode(s) offered (IDs %u..%u); %lu of %lu skipped, the table is full (%lu)",
+		      static_cast<unsigned long>(added), modeTable[base].id, modeTable[modeCount - 1].id,
+		      static_cast<unsigned long>(candidates - added), static_cast<unsigned long>(candidates),
+		      static_cast<unsigned long>(Modes::MaxModes));
+	else
+		FBLOG("hdr: %lu HDR10 mode(s) offered (IDs %u..%u), every SDR mode of the table has one",
+		      static_cast<unsigned long>(added), modeTable[base].id, modeTable[modeCount - 1].id);
+	return added;
+}
+
+// debug.rdna4_hdr (and rdna4-hdr at boot, parsed in init): 1 appends the variants and lets the timing hook write their
+// colour fields; 0 stops those writes but leaves the modes macOS has already seen in the table (it holds their IDs).
+void RDNA4Device::setHdrOption(bool on) {
+	if (!on) {
+		if (!hdrModes)
+			return;
+		hdrModes = false;
+		FBLOG("hdr: debug.rdna4_hdr=0: the variants already in the table stay (a reboot gives the plain table); the colour hook stops overwriting");
+		return;
+	}
+	if (!hdrTimingHook) {
+		FBLOG("hdr: debug.rdna4_hdr=1: the getTimingInfoForDisplayMode route is not in place, nothing offered");
+		return;
+	}
+	size_t have = 0;
+	for (size_t i = 0; i < modeCount; i++)
+		have += modeTable[i].hdr10 ? 1 : 0;
+	if (have) {
+		hdrModes = true;
+		FBLOG("hdr: debug.rdna4_hdr=1: the HDR10 variants are already in the table (%lu mode(s))",
+		      static_cast<unsigned long>(have));
+		return;
+	}
+	const bool first = !hdrModes;
+	hdrModes = true;
+	if (first)
+		FBLOG("hdr: debug.rdna4_hdr=1: the HDR10 variants are offered from now on (the table only grows)");
+	const size_t added = offerHdrModes();
+	if (added && modeTableGrew)
+		modeTableGrew(modeTableGrewCtx);
 }
 
 const Modes::Mode *RDNA4Device::findMode(uint32_t id) const {
@@ -3486,24 +3592,31 @@ bool RDNA4Device::bootPipeTarget(ModeSet::Target &t) {
 	return true;
 }
 
-// Every mode set reprograms the HUBP (and clears the angle), so the turn is re-applied around it.
+// Every mode set reprograms the HUBP (and clears the angle), so the turn is re-applied around it. The plane's format is
+// re-decided too: the mode set writes its own, and the OS depth (A4) or an HDR10 mode (A8) may say 10 bpc. Which mode
+// is live, and whether it is an HDR10 variant, is the translator's switchMode decision (setScanoutHdr), so a re-apply
+// of the running timing (display wake, link retrain, cold start) keeps it.
 IOReturn RDNA4Device::applyMode(const Modes::Mode &m) {
+	const bool was10bpc = scanout10bpc || scanoutHdr;
+
 	const IOReturn ret = applyModeRaw(m);
 
 	applyPanelRotation();
-	if (scanout10bpc)
-		applyScanoutFormat();   // a mode set reprograms the plane's format: the depth the OS switched to wins
+	if (was10bpc || scanout10bpc || scanoutHdr)
+		applyScanoutFormat();   // a mode set reprograms the plane's format: the depth or the HDR10 mode decides
 	return ret;
 }
 
-// The plane's pixel format follows the depth the OS switched the framebuffer to (cscSwitchMode's csMode): ARGB2101010
-// for the second depth, ARGB8888 otherwise. The formats are the values the Linux tables write (tools/gen/pipegen:
-// hubp*_program_pixel_format masks 0x7f, value 0x8); the rotation angle in bits [9:8] is left alone.
+// The plane's pixel format follows the depth the OS switched the framebuffer to (cscSwitchMode's csMode) or the HDR10
+// mode that is live (A8): ARGB2101010 for either, ARGB8888 otherwise. One place decides, so the two never fight. The
+// formats are the values the Linux tables write (tools/gen/pipegen: hubp*_program_pixel_format masks 0x7f, value 0x8);
+// the rotation angle in bits [9:8] is left alone.
 bool RDNA4Device::applyScanoutFormat() {
 	if (!pipe.valid())
 		return false;
 
-	const uint32_t fmt = scanout10bpc ? 0x0au : 0x08u;
+	const bool ten = scanout10bpc || scanoutHdr;
+	const uint32_t fmt = ten ? 0x0au : 0x08u;
 	const uint32_t hubp = 0x05e5u + hubpOff(), dpp = 0x0ccfu + dppOff();
 	const uint32_t hubpBefore = regReadDmu(2, hubp), dppBefore = regReadDmu(2, dpp);
 	const uint32_t hubpWant = (hubpBefore & ~0x7fu) | fmt, dppWant = (dppBefore & ~0x7fu) | fmt;
@@ -3519,9 +3632,10 @@ bool RDNA4Device::applyScanoutFormat() {
 	}
 	const uint32_t hubpAfter = regReadDmu(2, hubp), dppAfter = regReadDmu(2, dpp);
 
-	FBLOG("colour: plane format %s: HUBP 0x%08x -> 0x%08x, DPP 0x%08x -> 0x%08x (angle %u kept) %s",
-	      scanout10bpc ? "ARGB2101010 (0xa)" : "ARGB8888 (0x8)", hubpBefore, hubpAfter, dppBefore, dppAfter,
-	      (hubpAfter >> 8) & 3, ok ? "ok" : "FAILED");
+	FBLOG("colour: plane format %s%s: HUBP 0x%08x -> 0x%08x, DPP 0x%08x -> 0x%08x (angle %u kept) %s",
+	      ten ? "ARGB2101010 (0xa)" : "ARGB8888 (0x8)",
+	      scanoutHdr ? " [HDR10 mode]" : scanout10bpc ? " [OS depth 129]" : "",
+	      hubpBefore, hubpAfter, dppBefore, dppAfter, (hubpAfter >> 8) & 3, ok ? "ok" : "FAILED");
 	return ok;
 }
 
@@ -3532,8 +3646,25 @@ void RDNA4Device::setScanoutDepth(uint16_t depth) {
 		return;
 
 	scanout10bpc = deep;
-	FBLOG("colour: the OS switched the framebuffer to depth %u: plane format %s", depth,
-	      deep ? "ARGB2101010" : "ARGB8888");
+	FBLOG("colour: the OS switched the framebuffer to depth %u, so the plane format is %s%s", depth,
+	      (scanout10bpc || scanoutHdr) ? "ARGB2101010" : "ARGB8888",
+	      scanoutHdr ? " anyway (an HDR10 mode is live)" : "");
+	// An HDR10 mode decides the format, not the depth: re-apply so a depth change cannot take the plane back to 8 bpc.
+	// Without the option this stays the A4 path, where applyMode re-applies after the switch.
+	if (scanoutHdr)
+		applyScanoutFormat();
+}
+
+// A8: the live mode is one of the table's HDR10 variants (cscSwitchMode's entry carries hdr10). The plane reads 10 bpc
+// even when the OS stayed at depth 128, because the timing's dynamicRange/colorimetry is what the picture is; the one
+// place that decides the format (applyScanoutFormat) keeps this from fighting the depth.
+void RDNA4Device::setScanoutHdr(bool on) {
+	if (on == scanoutHdr)
+		return;
+
+	scanoutHdr = on;
+	FBLOG("hdr: the live mode is %s; the plane format is %s", on ? "an HDR10 variant" : "not HDR10",
+	      (scanout10bpc || scanoutHdr) ? "ARGB2101010" : "ARGB8888");
 	applyScanoutFormat();
 }
 
@@ -3563,6 +3694,28 @@ static int panelRotSysctl SYSCTL_HANDLER_ARGS
 
 SYSCTL_PROC(_debug, OID_AUTO, rdna4_rot180, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, panelRotSysctl, "I",
             "AMDRadeonRDNA4: rdna4-rot180: a panel mounted inverted: 0 off (default), 1 the screen read turned 180 degrees and the cursor with it");
+
+// debug.rdna4_hdr: rdna4-hdr at run time. 1 appends the modes' HDR10 variants to the live table and lets the timing hook
+// write their colour fields; 0 stops those writes. The table only grows: macOS holds the mode IDs it has seen, so a
+// plain table needs a boot without the option (docs/hdr-a8-mode-colour.md).
+static int hdrSysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int value = RDNA4Device::hdrEnabled() ? 1 : 0;
+	int err = sysctl_handle_int(oidp, &value, 0, req);
+
+	if (err || !req->newptr)
+		return err;
+	if (value < 0 || value > 1)
+		return EINVAL;
+
+	if (gHdrDevice)
+		gHdrDevice->setHdrOption(value != 0);
+	return 0;
+}
+
+SYSCTL_PROC(_debug, OID_AUTO, rdna4_hdr, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, hdrSysctl, "I",
+            "AMDRadeonRDNA4: rdna4-hdr: 0 off (default, the plain SDR mode table); 1 the modes' HDR10 variants are offered and their timings carry dynamicRange HDR10, BT2020|BT2100 and 10 bits a component");
 
 // rdna4-rot180: the plane reads its scanout turned 180 degrees, and every flip keeps the angle and hands the HUBP the address such
 // a read starts at (flip.cpp keeps both per HUBP, so nothing else has to know). The runtime does it when it is up; without one

@@ -260,6 +260,9 @@ struct Backend {
 	int32_t (*getHardwareCursorDrawState)(void *ctx, VDHardwareCursorDrawStateRec &state);
 	// The depth a switch selected (kDepthMode1 = 128, kDepthMode2 = 129): the plane's pixel format follows it.
 	void (*setScanoutDepth)(void *ctx, uint16_t depth);
+	// The mode a switch selected is one of the HDR10 variants (Mode::hdr10): the plane reads ARGB2101010 while it is
+	// live, whatever the OS depth. Called after the switch succeeded, so a refused mode leaves the old colour alone.
+	void (*setHdrMode)(void *ctx, bool on);
 };
 
 class Translator {
@@ -287,6 +290,11 @@ public:
 	size_t  modeCount() const { return count; }
 	// NDRV mode ID of table entry `m`.
 	int32_t idFor(const Modes::Mode &m) const;
+	// The table entry an NDRV mode ID names, or nullptr (the HDR10 colour hook, plugin.cpp).
+	const Modes::Mode *modeForDisplayId(int32_t id) const { return modeFor(id); }
+	// The table grew at run time (debug.rdna4_hdr appended the HDR10 variants): serve the entries up to `n`. Never
+	// shrinks — the IDs macOS already holds must stay answered.
+	void setModeCount(size_t n);
 
 private:
 	const Modes::Mode *modes { nullptr };

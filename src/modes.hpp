@@ -52,6 +52,10 @@ struct Mode {
 	uint32_t refreshMilliHz;     // rounded to the nearest mHz
 	bool native;                 // EDID preferred timing
 	uint8_t source;              // Source
+	// rdna4-hdr=1 (device.cpp, RDNA4Device::buildModeTable): the same raster as the SDR mode it was made from, offered
+	// with dynamicRange HDR10, colorimetry BT2020|BT2100 and 10 bits a component (getTimingInfoForDisplayMode's
+	// colour hook). Appended after the SDR table under an ID of its own; false for every mode of a plain boot.
+	bool hdr10;
 };
 
 struct Limits {

@@ -66,6 +66,20 @@ public:
 	// rdna4-depth2=1 (A3): the framebuffer is in the second depth, so the plane reads ARGB2101010 (0xa) instead of
 	// ARGB8888 (0x8). Kept across mode sets: applyMode re-applies it after applyPanelRotation.
 	bool                scanout10bpc { false };
+	// rdna4-hdr=1 (debug.rdna4_hdr at run time): the mode table also offers the modes' HDR10 variants (own IDs, same
+	// raster: dynamicRange HDR10, BT2020|BT2100, 10 bits a component, filled by plugin.cpp's
+	// getTimingInfoForDisplayMode hook), and the plane reads ARGB2101010 while one of them is the live mode
+	// (docs/hdr-a8-mode-colour.md). Off by default: nothing of it exists then.
+	static bool hdrEnabled() { return hdrModes; }
+	// plugin.cpp: the getTimingInfoForDisplayMode route is in place, so the colour fields can be written. Without it
+	// no HDR10 mode is offered: it would be an SDR duplicate of a mode macOS already has.
+	static void setTimingHookInstalled(bool on) { hdrTimingHook = on; }
+	bool        scanoutHdr { false };     // the live mode is one of those variants: the plane reads ARGB2101010
+	void setHdrOption(bool on);           // debug.rdna4_hdr: off→on appends the variants (the table only grows)
+	size_t offerHdrModes();               // append the HDR10 variants of the modes the table holds, room permitting
+	// Called after the mode table grew at run time: the NDRV translator has to serve the new entries.
+	void (*modeTableGrew)(void *ctx) { nullptr };
+	void *modeTableGrewCtx { nullptr };
 
 	// EDID of the boot display's sink: the base block and every extension it reports (E-DDC segments), up to
 	// three blocks. The same bytes are served to macOS (cscGetDDCBlock) and are what the mode table is built from:
@@ -338,7 +352,8 @@ public:
 	bool supportsHardwareCursor() const { return hwCursorReady; }
 	bool ndrvHardwareCursor() const { return hwCursorReady && ndrvCursorRequested; }   // IONDRV's cscSupportsHardwareCursor: rdna4-cursor=1 only
 	void setScanoutDepth(uint16_t depth);   // cscSwitchMode's depth: the plane's format follows it
-	bool applyScanoutFormat();              // program HUBP and DPP surface format for scanout10bpc
+	void setScanoutHdr(bool on);            // cscSwitchMode's mode is an HDR10 variant: the format follows that too
+	bool applyScanoutFormat();              // program HUBP and DPP surface format for scanout10bpc or scanoutHdr
 	IOReturn setHardwareCursor(void *cursorRef);
 	IOReturn drawHardwareCursor(int32_t x, int32_t y, uint32_t visible);
 	// The paravirtual display's cursor (PvScanout::cursorImage): straight ARGB pixels, `pitch` pixels a row, at most 64x64.
@@ -361,6 +376,8 @@ public:
 	uint64_t liveFramePeriodNs() const;
 
 private:
+	static bool hdrModes;        // rdna4-hdr=1 (boot arg) or debug.rdna4_hdr=1 at run time
+	static bool hdrTimingHook;   // plugin.cpp routed IONDRVFramebuffer::getTimingInfoForDisplayMode
 	IOPCIDevice *pciDevice { nullptr };
 	IOService   *owner { nullptr };
 

@@ -179,6 +179,7 @@ mach_vm_address_t orgDoDriverIO { 0 };
 mach_vm_address_t orgGetPixelInformation { 0 };
 mach_vm_address_t orgSetAttributeForConnection { 0 };
 mach_vm_address_t orgGetAttributeForConnection { 0 };
+mach_vm_address_t orgGetTimingInfoForDisplayMode { 0 };
 mach_vm_address_t orgVslNew { 0 };
 mach_vm_address_t orgVslDispose { 0 };
 mach_vm_address_t orgVslDo { 0 };
@@ -280,6 +281,23 @@ FbEntry *fbEntry(void *fb) {
 	return nullptr;
 }
 
+// The table entry for `fb` if it has been seen; never adds one. The timing hook runs for every mode query and must not
+// put framebuffers (or a log line) into the table just by being asked about them.
+FbEntry *fbFind(void *fb) {
+	for (auto &e : fbTable)
+		if (e.fb == fb)
+			return &e;
+	return nullptr;
+}
+
+// debug.rdna4_hdr appended modes to the device's table at run time (RDNA4Device::setHdrOption): the NDRV translator
+// has to serve the new entries under their new IDs, while every ID macOS already holds stays answered.
+void modeTableGrew(void *ctx) {
+	auto *st = static_cast<FbState *>(ctx);
+	st->ndrv.setModeCount(st->dev.modeCount);
+	FBLOG("hdr: the NDRV translator serves %lu mode(s) now", static_cast<unsigned long>(st->ndrv.modeCount()));
+}
+
 // Ndrv::Backend over RDNA4Device. Every mode reuses the boot surface: modes
 // never exceed the GOP framebuffer and keep its pitch (see device.hpp).
 bool deviceSurfaceFor(void *ctx, const Modes::Mode &m, bool, Ndrv::Surface &out) {
@@ -296,6 +314,10 @@ int32_t deviceSwitchTo(void *ctx, const Modes::Mode &m, bool) {
 
 void deviceSetScanoutDepth(void *ctx, uint16_t depth) {
 	static_cast<RDNA4Device *>(ctx)->setScanoutDepth(depth);
+}
+
+void deviceSetHdrMode(void *ctx, bool on) {
+	static_cast<RDNA4Device *>(ctx)->setScanoutHdr(on);
 }
 
 void deviceSetPower(void *ctx, bool on) {
@@ -1260,6 +1282,66 @@ IOReturn wrapGetAttributeForConnection(void *fb, int connectIndex, unsigned int 
 	return r;
 }
 
+// A8 (docs/hdr-a8-mode-colour.md): the mode table's HDR10 variants carry their colour in the timing, and
+// IONDRVFramebuffer is a pure relay of the NDRV detailed-timing record (the KC's getTimingInfoForDisplayMode fills
+// IOTimingInformation from cscGetDetailedTiming and zeroes the V2 header words, but not the colour ones). Only three
+// words are written, only for our own hdr10 entries, and only when the caller asked for detailed timing (flags carries
+// kIODetailedTimingValid, which IOFramebuffer::extGetInformationForDisplayMode sets: IOFramebuffer.cpp:11488).
+// appleTimingID and flags stay exactly as the original left them. The offsets are the SDK's, asserted here: a header
+// that lays the structure out differently fails the build instead of the boot.
+static_assert(sizeof(IODetailedTimingInformationV2) == 0xa0, "IODetailedTimingInformationV2 size");
+static_assert(__builtin_offsetof(IOTimingInformation, detailedInfo) == 8, "IOTimingInformation.detailedInfo");
+static_assert(__builtin_offsetof(IODetailedTimingInformationV2, bitsPerColorComponent) == 0x8a,
+              "IODetailedTimingInformationV2.bitsPerColorComponent");
+static_assert(__builtin_offsetof(IODetailedTimingInformationV2, colorimetry) == 0x8c,
+              "IODetailedTimingInformationV2.colorimetry");
+static_assert(__builtin_offsetof(IODetailedTimingInformationV2, dynamicRange) == 0x8e,
+              "IODetailedTimingInformationV2.dynamicRange");
+
+IOReturn wrapGetTimingInfoForDisplayMode(void *fb, int32_t displayMode, IOTimingInformation *info) {
+	auto org = reinterpret_cast<IOReturn (*)(void *, int32_t, IOTimingInformation *)>(orgGetTimingInfoForDisplayMode);
+
+	if (!info) {
+		// Apple's relay writes the record at its first instruction; its callers always pass one. Refused once, with a
+		// line, rather than taking the kernel down over a caller bug.
+		static bool noted = false;
+		if (!noted) {
+			noted = true;
+			FBLOG("hdr: getTimingInfoForDisplayMode with no IOTimingInformation pointer: refused (Apple's relay would dereference it)");
+		}
+		return kIOReturnBadArgument;
+	}
+	const IOReturn r = org(fb, displayMode, info);
+
+	// Off by default, and a failed original is passed through untouched: the option must never turn a timing query
+	// into a boot problem.
+	if (!RDNA4Device::hdrEnabled() || r != kIOReturnSuccess)
+		return r;
+	FbEntry *e = fbFind(fb);
+	const Modes::Mode *m = e && e->state ? e->state->ndrv.modeForDisplayId(displayMode) : nullptr;
+	if (!m || !m->hdr10)
+		return r;
+	if (!(info->flags & kIODetailedTimingValid)) {
+		// IOFramebuffer::updateOnline's offline probe asks for appleTimingID only (flags = 0): the union is not a V2
+		// there, so writing its colour words would be meaningless. Said once, not per mode.
+		static bool noted = false;
+		if (!noted) {
+			noted = true;
+			FBLOG("hdr: getTimingInfoForDisplayMode without kIODetailedTimingValid: no colour written (appleTimingID only)");
+		}
+		return r;
+	}
+	IODetailedTimingInformationV2 &v2 = info->detailedInfo.v2;
+	v2.bitsPerColorComponent = kIOBitsPerColorComponent10;
+	v2.colorimetry = static_cast<UInt16>(kIOColorimetryBT2020 | kIOColorimetryBT2100);
+	v2.dynamicRange = kIODynamicRangeHDR10;
+	static uint32_t logged = 0;
+	if (__atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) < 8)
+		FBLOG("hdr: mode %d: dynamicRange HDR10, colorimetry BT2020|BT2100, 10 bits a component (flags 0x%x)",
+		      displayMode, info->flags);
+	return r;
+}
+
 // The stand-in for IOBootNDRV::doDriverIO.
 IOReturn head2DriverIO(Head2 *h, void *contents, UInt32 commandCode, uint16_t &code) {
 	if (!h->ready) {
@@ -1330,7 +1412,7 @@ void attach(FbEntry &e) {
 	Ndrv::Backend be { &dev, deviceSurfaceFor, deviceSwitchTo, deviceSetPower,
 	                   deviceSupportsHardwareCursor, deviceSetHardwareCursor,
 	                   deviceDrawHardwareCursor, deviceGetHardwareCursorDrawState,
-	                   deviceSetScanoutDepth };
+	                   deviceSetScanoutDepth, deviceSetHdrMode };
 #ifdef AMDRadeonRDNA4_VM_TEST
 	if (!dev.isAmd) {
 		pci->setIOEnable(true);
@@ -1345,6 +1427,9 @@ void attach(FbEntry &e) {
 	}
 #endif
 	st->ndrv.init(dev.modeTable, dev.modeCount, dev.defaultModeId, dev.edidData, dev.edidLen, be);
+	// A run-time debug.rdna4_hdr=1 appends modes to the same table; the translator has to serve them from then on.
+	dev.modeTableGrew = modeTableGrew;
+	dev.modeTableGrewCtx = st;
 	{
 		uint32_t depth2 = 0;
 
@@ -1884,6 +1969,23 @@ void processKext(void *, KernelPatcher &patcher, size_t index, mach_vm_address_t
 	}
 	if (index != kextIONDRVSupport.loadIndex || __atomic_exchange_n(&ndrvRouted, true, __ATOMIC_SEQ_CST))
 		return;
+	// A8 (docs/hdr-a8-mode-colour.md): the HDR10 colour of the mode table's variants. Routed on every boot because
+	// debug.rdna4_hdr=1 enables the feature at run time; RDNA4Device::hdrEnabled() gates the writes. A missing symbol
+	// costs the HDR10 modes, one log line and nothing else: the option must never be able to stop a boot. Before the
+	// doDriverIO route: attaching (which builds the mode table) is what that route lets happen, and the table wants
+	// to know whether the colour can be written at all.
+	KernelPatcher::RouteRequest hdrTiming {
+		"__ZN17IONDRVFramebuffer27getTimingInfoForDisplayModeEiP19IOTimingInformation",
+		wrapGetTimingInfoForDisplayMode, orgGetTimingInfoForDisplayMode,
+	};
+	const bool hdrRouted = patcher.routeMultiple(index, &hdrTiming, 1, address, size);
+	RDNA4Device::setTimingHookInstalled(hdrRouted);
+	if (hdrRouted)
+		FBLOG("hdr: routed IONDRVFramebuffer::getTimingInfoForDisplayMode (HDR10 colour fields)");
+	else
+		FBLOG("hdr: no IONDRVFramebuffer::getTimingInfoForDisplayMode route (error %d): HDR10 modes are not offered",
+		      patcher.getError());
+	patcher.clearError();
 	KernelPatcher::RouteRequest request {
 		"__ZN17IONDRVFramebuffer10doDriverIOEjPvjj", wrapDoDriverIO, orgDoDriverIO,
 	};

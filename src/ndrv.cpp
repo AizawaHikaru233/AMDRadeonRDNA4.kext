@@ -134,6 +134,14 @@ int32_t Translator::idFor(const Modes::Mode &m) const {
 	return m.id == bootModeId ? kBootModeId : kBootModeId + static_cast<int32_t>(m.id);
 }
 
+void Translator::setModeCount(size_t n) {
+	// Entries are only ever appended (RDNA4Device::offerHdrModes), so every ID and the order macOS holds stay; a
+	// smaller count is left alone. count 0 means init found no boot entry and left the mode requests to IOBootNDRV:
+	// growing from that would serve entries whose IDs were never tied to what it already answered.
+	if (modes && count && n > count)
+		count = n;
+}
+
 const Modes::Mode *Translator::modeFor(int32_t id) const {
 	for (size_t i = 0; i < count; i++)
 		if (idFor(modes[i]) == id)
@@ -429,6 +437,10 @@ int32_t Translator::switchMode(VDSwitchInfoRec &r) {
 		if (!surface(*m, s))
 			return kBadArgument;
 	}
+	// Only now the mode is the live one: its colour decides the plane format (A8). A refused switch returned above with
+	// the previous mode's state.
+	if (be.setHdrMode)
+		be.setHdrMode(be.ctx, m->hdr10);
 	r.csBaseAddr = static_cast<uintptr_t>(1 | s.physBase);
 	return kSuccess;
 }
