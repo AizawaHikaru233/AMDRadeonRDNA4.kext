@@ -140,3 +140,41 @@ Consequences, in order:
    compression ratio. This is the only way to 4K above 60 Hz on this link.
 3. 30bpp + `'hdrm'`: hook `IONDRVFramebuffer::getPixelInformation` / `setAttributeForConnection`, see
    what WindowServer asks with a 10 bpc pipe behind it.
+
+## A2 result (2026-11-25 20:49, on the card)
+
+Ran with `rdna4-depth2=1` and three routes added to the plugin (observation only, `src/plugin.cpp`):
+`IONDRVFramebuffer::getPixelInformation`, `setAttributeForConnection`, `getAttributeForConnection` — symbol
+names read from the kernel collection, not guessed (`__ZN17IONDRVFramebuffer19getPixelInformationEiiiP18IOPixelInformation`,
+`…25setAttributeForConnectionEijm`, `…25getAttributeForConnectionEijPm`). Evidence:
+`hw-logs/2026-11-25-a2-depth-attributes.txt`.
+
+**What was measured**
+
+- **IONDRVFramebuffer builds a real 30bpp pixel format from our NDRV answer**:
+  `depth 1 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360`.
+  The masks are `ARGB2101010`. So the "IONDRV cannot represent 10-bit" claim is refuted at the format level:
+  the records carry it and Apple's own class turns them into the modern format.
+- **The OS looks at it and does not take it**: depth 1 is asked 67 times, depth 0 (3×8) stays current, and
+  no `cscSwitchMode` carried `csMode 129` (A1's finding stands).
+- **No HDR metadata traffic**: `'hdrm'` (`kIOFBHDRMetaDataAttribute`) never appears — 0 requests on the
+  connection, set or get. What does arrive on the connection are colour/gamma attributes:
+  `'flgs'`, `'colr'` (= 0x10001001, refused 0xe00002c7), `' bpc'` (= 6), `'dflg'`, and the three colour-matrix
+  channels `'rgsc' 'ggsc' 'bgsc'` plus `'vblm' 'flus'` (all 0x10000).
+
+**Verdict**
+
+The seam is real and wider than A1 showed: the NDRV route can hand macOS a 10-bit pixel format, and macOS
+inspects it. What is missing is the *reason* for WindowServer to choose it, and that reason is HDR being
+declared to CoreDisplay at the display level — not `'hdrm'` (nobody asks for it) but the display's own
+capability path. A `' bpc'` = 6 attribute arriving before anything else is worth understanding: either the
+display asks for 6 bits a component, or that constant means something else; the values are in the log.
+
+**Order from here**
+
+1. Decode the connection attributes the OS does send (`' bpc'` 6, `'colr'` 0x10001001) against
+   `IOGraphicsTypes.h` / `IOFramebuffer.h` and Apple's IONDRVSupport behaviour: these are the levers the OS
+   pulls before it would pick a 10-bit depth.
+2. Only then the pipe: program DCN for 10 bpc (and a 10 bpc DP pixel encoding) so a chosen depth 1 can
+   actually be scanned out.
+3. DSC stays the separate, larger track for 4K above 60 Hz (see the DPCD section above).

@@ -177,6 +177,9 @@ KernelPatcher::KextInfo kextIOSurface {
 #endif
 
 mach_vm_address_t orgDoDriverIO { 0 };
+mach_vm_address_t orgGetPixelInformation { 0 };
+mach_vm_address_t orgSetAttributeForConnection { 0 };
+mach_vm_address_t orgGetAttributeForConnection { 0 };
 mach_vm_address_t orgVslNew { 0 };
 mach_vm_address_t orgVslDispose { 0 };
 mach_vm_address_t orgVslDo { 0 };
@@ -1259,6 +1262,38 @@ IOService *bootFramebuffer(IOPCIDevice *pci) {
 	return best;
 }
 
+// A2 (docs/hdr-30bpp-plan.md): what macOS asks about depths and connection attributes once the NDRV records
+// offer a second depth. Observation only: every call goes through to IONDRVFramebuffer, and the log line appears
+// only while rdna4-depth2=1 is armed, so a normal boot is unchanged.
+IOReturn wrapGetPixelInformation(void *fb, int connectIndex, int depth, int aperture, IOPixelInformation *info) {
+	auto org = reinterpret_cast<IOReturn (*)(void *, int, int, int, IOPixelInformation *)>(orgGetPixelInformation);
+	const IOReturn r = org(fb, connectIndex, depth, aperture, info);
+	if (depth2Mode && info)
+		FBLOG("depth: getPixelInformation conn %d depth %d ap %d -> 0x%x: %u bpp type %u comp %u×%u mask %08x %08x %08x %ux%u row %u", connectIndex, depth,
+		      aperture, static_cast<unsigned>(r), info->bitsPerPixel, info->pixelType, info->componentCount, info->bitsPerComponent,
+		      info->componentMasks[0], info->componentMasks[1], info->componentMasks[2], info->activeWidth, info->activeHeight,
+		      info->bytesPerRow);
+	return r;
+}
+
+IOReturn wrapSetAttributeForConnection(void *fb, int connectIndex, unsigned int attribute, unsigned long value) {
+	auto org = reinterpret_cast<IOReturn (*)(void *, int, unsigned int, unsigned long)>(orgSetAttributeForConnection);
+	const IOReturn r = org(fb, connectIndex, attribute, value);
+	if (depth2Mode || attribute == kIOFBHDRMetaDataAttribute)
+		FBLOG("attr: setAttributeForConnection conn %d attr 0x%08x value 0x%lx -> 0x%x", connectIndex, attribute, value,
+		      static_cast<unsigned>(r));
+	return r;
+}
+
+IOReturn wrapGetAttributeForConnection(void *fb, int connectIndex, unsigned int attribute, unsigned long *value) {
+	auto org = reinterpret_cast<IOReturn (*)(void *, int, unsigned int, unsigned long *)>(orgGetAttributeForConnection);
+	const IOReturn r = org(fb, connectIndex, attribute, value);
+	if (depth2Mode)
+		FBLOG("attr: getAttributeForConnection conn %d attr 0x%08x -> 0x%x value 0x%lx", connectIndex, attribute,
+		      static_cast<unsigned>(r), value ? *value : 0ul);
+	return r;
+}
+
 // The stand-in for IOBootNDRV::doDriverIO.
 IOReturn head2DriverIO(Head2 *h, void *contents, UInt32 commandCode, uint16_t &code) {
 	if (!h->ready) {
@@ -1911,6 +1946,18 @@ void processKext(void *, KernelPatcher &patcher, size_t index, mach_vm_address_t
 	else
 		FBLOG("ndrv: failed to route IONDRVFramebuffer::doDriverIO (error %d)",
 		      patcher.getError());
+	patcher.clearError();
+	// The A2 probes: depths and connection attributes (names read from the kernel collection: the mangling is
+	// IONDRVFramebuffer's, not our own types').
+	KernelPatcher::RouteRequest depthProbe[] {
+		{ "__ZN17IONDRVFramebuffer19getPixelInformationEiiiP18IOPixelInformation", wrapGetPixelInformation, orgGetPixelInformation },
+		{ "__ZN17IONDRVFramebuffer25setAttributeForConnectionEijm", wrapSetAttributeForConnection, orgSetAttributeForConnection },
+		{ "__ZN17IONDRVFramebuffer25getAttributeForConnectionEijPm", wrapGetAttributeForConnection, orgGetAttributeForConnection },
+	};
+	if (!patcher.routeMultiple(index, depthProbe, 3, address, size))
+		FBLOG("depth: no getPixelInformation / attribute-for-connection routes (error %d)", patcher.getError());
+	else
+		FBLOG("depth: routed IONDRVFramebuffer::getPixelInformation and the attribute-for-connection pair");
 	patcher.clearError();
 	// The second display and its hot-plug are on unless turned off: lit at
 	// boot, mode switching, display sleep and hot-plug ran on the card for an
