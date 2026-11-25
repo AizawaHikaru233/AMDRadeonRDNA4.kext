@@ -8,8 +8,12 @@
 //  the monitor. The plugin (plugin.cpp) hands the csc Status/Control
 //  requests for our framebuffer to a Translator first; it answers the mode
 //  list, timings, EDID, connection and DPMS requests from the AMDRadeonRDNA4 mode
-//  table and the sink's EDID, and everything it does not handle (gamma,
-//  CLUT, power state, cursor, ...) stays with IOBootNDRV.
+//  table and the sink's EDID, and everything it does not handle (CLUT, power
+//  state, cursor, ...) stays with IOBootNDRV. The gamma selectors (4, 8, 20, 21)
+//  are answered only when rdna4-gamma arms them: without them
+//  IONDRVFramebuffer::checkDriver publishes the "no gamma" defaults 8 / 256, and
+//  CoreDisplay then refuses the plane any HDR capability
+//  (docs/hdr-gamma.md, docs/hdr-userspace-gating.md §1.4).
 //
 //  Mode IDs: the boot mode keeps IOBootNDRV's 100 (IONDRVFramebuffer may
 //  have cached it before the first request reached us); every other table
@@ -37,16 +41,19 @@ namespace Ndrv {
 // csc selectors (IOMacOSVideo.h).
 enum : uint16_t {
 	// Status
+	cscGetGamma           = 8,
 	cscGetCurMode         = 10,
 	cscGetSync            = 11,
 	cscGetConnection      = 12,
 	cscGetModeTiming      = 13,
 	cscGetNextResolution  = 17,
 	cscGetVideoParameters = 18,
-	cscGetDDCBlock        = 27,
-	cscGetDetailedTiming  = 31,
+	cscGetGammaInfoList   = 20,
+	cscRetrieveGammaTable = 21,
 	cscSupportsHardwareCursor = 22,
 	cscGetHardwareCursorDrawState = 23,
+	cscGetDDCBlock        = 27,
+	cscGetDetailedTiming  = 31,
 	// Control
 	cscSetEntries         = 3,
 	cscSetGamma           = 4,
@@ -235,6 +242,72 @@ struct VDHardwareCursorDrawStateRec {
 	uint32_t csReserved2;
 };
 
+// --- gamma (docs/hdr-gamma.md) -----------------------------------------------
+//
+// IONDRVFramebuffer::checkDriver (0x1475c7de in the 26.6.2 System KC) asks
+// cscGetGamma (8) for a GammaTbl and reads its gDataCnt and gDataWidth into
+// IOFBGammaCount and IOFBGammaWidth; without one it publishes the hard-coded
+// defaults 256 and 8 (the branch at 0x1475c9b8), which is why the plane
+// reports no gamma. It then enumerates tables with cscGetGammaInfoList (20) and
+// fetches them with cscRetrieveGammaTable (21), keeping the widest table it is
+// offered. cscSetGamma (4) is what IONDRVFramebuffer::setGammaTable sends, with
+// a GammaTbl the kernel has already laid out in front of the entries.
+
+// IOMacOSTypes.h GammaTbl: the six 16-bit fields, then gFormulaData[1].
+struct GammaTbl {
+	int16_t gVersion;
+	int16_t gType;
+	int16_t gFormulaSize;
+	int16_t gChanCnt;
+	int16_t gDataCnt;      // values per channel
+	int16_t gDataWidth;    // bits per value (8, 10, 12, 16)
+	// int16_t gFormulaData[]; the values follow the header.
+};
+
+// IOMacOSVideo.h VDGammaRecord: the parm block of cscGetGamma/cscSetGamma.
+struct VDGammaRecord {
+	void *csGTable;        // GammaTbl * (in and out)
+};
+
+// IOMacOSVideo.h VDGetGammaListRec: the parm block of cscGetGammaInfoList.
+struct VDGetGammaListRec {
+	uint32_t csPreviousGammaTableID;   // in: kGammaTableIDFindFirst, then the previous answer
+	uint32_t csGammaTableID;           // out: the next table, or kGammaTableIDNoMoreTables
+	uint32_t csGammaTableSize;         // out: bytes the retrieve must copy
+	char    *csGammaTableName;         // out: a name (not written by this driver)
+};
+
+// IOMacOSVideo.h VDRetrieveGammaRec: the parm block of cscRetrieveGammaTable.
+struct VDRetrieveGammaRec {
+	uint32_t csGammaTableID;
+	void    *csGammaTablePtr;          // GammaTbl * into a buffer of csGammaTableSize bytes
+};
+
+// IOMacOSVideo.h GammaTableID values.
+constexpr uint32_t kGammaTableIDFindFirst    = 0xFFFFFFFE;
+constexpr uint32_t kGammaTableIDNoMoreTables = 0xFFFFFFFD;
+constexpr uint32_t kGammaTableIDSpecific     = 0;
+
+constexpr uint16_t kGammaVersion   = 0;   // what IONDRVFramebuffer::setGammaTable writes
+constexpr uint16_t kGammaHeaderSize = 12; // sizeof(GammaTbl); IOFBGammaHeaderSize
+// The table this driver offers: a linear (identity) ramp, 10 bits, 1024 values a
+// channel, three channels — 2 bytes a value, so 12 + 3 * 1024 * 2 = 6156 bytes.
+constexpr uint16_t kGammaChannels  = 3;
+constexpr uint16_t kGammaEntries   = 1024;
+constexpr uint16_t kGammaDataWidth = 10;
+constexpr size_t   kGammaTableBytes =
+	kGammaHeaderSize + static_cast<size_t>(kGammaChannels) * kGammaEntries * 2;
+
+// One line per gamma selector (rdna4-gamma=1). `ev` names the selector and says
+// what the four numbers are; plugin.cpp formats the line, so no format string
+// leaves the kernel build (a %s fed a number is a panic, AGENTS.md §一).
+enum class GammaEvent : uint8_t {
+	Set,        // a = gChanCnt, b = gDataCnt, c = gDataWidth, d = gFormulaSize
+	Get,        // a = bytes the table has, b = 1 if macOS set it, else 0
+	List,       // a = previous ID, b = returned ID, c = size
+	Retrieve,   // a = requested ID, b = bytes copied
+};
+
 
 // --- backend -----------------------------------------------------------------
 
@@ -263,6 +336,9 @@ struct Backend {
 	// The mode a switch selected is one of the HDR10 variants (Mode::hdr10): the plane reads ARGB2101010 while it is
 	// live, whatever the OS depth. Called after the switch succeeded, so a refused mode leaves the old colour alone.
 	void (*setHdrMode)(void *ctx, bool on);
+	// rdna4-gamma=1: one line per gamma selector, with its arguments and the verdict. Null = no logging (the host
+	// test's backends leave it out).
+	void (*gammaLog)(void *ctx, GammaEvent ev, int32_t a, int32_t b, int32_t c, int32_t d, int32_t ret);
 };
 
 class Translator {
@@ -295,6 +371,12 @@ public:
 	// The table grew at run time (debug.rdna4_hdr appended the HDR10 variants): serve the entries up to `n`. Never
 	// shrinks — the IDs macOS already holds must stay answered.
 	void setModeCount(size_t n);
+	// rdna4-gamma=1 / debug.rdna4_gamma: answer cscSetGamma (4), cscGetGamma (8), cscGetGammaInfoList (20) and
+	// cscRetrieveGammaTable (21). 0 = off (the selectors stay with IOBootNDRV), 1 = a 10 bit / 1024 entry ramp,
+	// 2 = a 12 bit / 256 entry ramp (the A/B of docs/hdr-gamma.md §5). Off at boot unless armed, so a failure cannot
+	// change the shipped behaviour.
+	void setGammaOption(uint32_t level);
+	uint32_t gammaOption() const { return gammaLevel; }
 
 private:
 	const Modes::Mode *modes { nullptr };
@@ -308,6 +390,18 @@ private:
 	bool     connected { true };
 	bool     depth2 { false };
 	uint8_t  currentDepth { kDepthMode1 };
+	// The gamma table this driver serves: the linear ramp until macOS sends one of its own (cscSetGamma), that one
+	// after. cscGetGamma, cscGetGammaInfoList and cscRetrieveGammaTable all describe this one table.
+	bool     gamma { false };
+	bool     gammaFromMacOS { false };
+	uint16_t gammaLen { 0 };        // bytes the table occupies (header + values)
+	uint16_t gammaListSize { 0 };   // what cscGetGammaInfoList last advertised, which bounds the cscRetrieveGammaTable copy
+	uint32_t gammaLevel { 0 };      // rdna4-gamma: 0 = off, 1 = 10 bit / 1024, 2 = 12 bit / 256
+	uint16_t gammaEntries { kGammaEntries };
+	uint16_t gammaDataWidth { kGammaDataWidth };
+	// Never allocated, never resized: laid out in setGammaOption, read by the kernel as a GammaTbl, so it is
+	// aligned for the 16-bit header fields.
+	alignas(8) uint8_t gammaTable[kGammaTableBytes] {};
 
 	const Modes::Mode *modeFor(int32_t id) const;
 	bool surface(const Modes::Mode &m, Surface &out) const;
@@ -322,6 +416,20 @@ private:
 	int32_t getSync(VDSyncInfoRec &r) const;
 	int32_t switchMode(VDSwitchInfoRec &r);
 	int32_t setSync(const VDSyncInfoRec &r);
+
+	// gamma (docs/hdr-gamma.md)
+	void    buildGammaRamp();
+	int32_t gammaGet(VDGammaRecord &r) const;
+	int32_t gammaList(VDGetGammaListRec &r);
+	int32_t gammaRetrieve(VDRetrieveGammaRec &r) const;
+	int32_t gammaSet(const VDGammaRecord &r);
+	void    gammaEvent(GammaEvent ev, int32_t a, int32_t b, int32_t c, int32_t d, int32_t ret) const {
+		if (be.gammaLog)
+			be.gammaLog(be.ctx, ev, a, b, c, d, ret);
+	}
+	GammaTbl *gammaHeader() const {
+		return const_cast<GammaTbl *>(reinterpret_cast<const GammaTbl *>(gammaTable));
+	}
 };
 
 // --- a head with no IOBootNDRV behind it (docs/second-head-ndrv.md) ----------

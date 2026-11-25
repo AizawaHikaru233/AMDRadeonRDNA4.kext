@@ -35,6 +35,7 @@
 #include <IOKit/ndrvsupport/IOMacOSVideo.h>
 #include <IOKit/ndrvsupport/IONDRVLibraries.h>
 #include <pexpert/pexpert.h>
+#include <sys/sysctl.h>       // debug.rdna4_gamma (docs/hdr-gamma.md)
 #include <kern/thread_call.h>
 #include <mach/kmod.h>
 
@@ -137,6 +138,35 @@ static_assert(sizeof(Ndrv::VDSetHardwareCursorRec) == sizeof(::VDSetHardwareCurs
               sizeof(Ndrv::VDSupportsHardwareCursorRec) == sizeof(::VDSupportsHardwareCursorRec) &&
               sizeof(Ndrv::VDHardwareCursorDrawStateRec) == sizeof(::VDHardwareCursorDrawStateRec),
               "NDRV cursor records");
+// The gamma records (docs/hdr-gamma.md): IONDRVFramebuffer::checkDriver reads
+// gDataCnt (offset 8) and gDataWidth (offset 0xa) out of our table with signed
+// 16-bit loads and writes the header of the table it sends us the same way, so
+// the mirror has to be the SDK's struct field for field.
+NDRV_SAME_FIELD(GammaTbl, gVersion);
+NDRV_SAME_FIELD(GammaTbl, gType);
+NDRV_SAME_FIELD(GammaTbl, gFormulaSize);
+NDRV_SAME_FIELD(GammaTbl, gChanCnt);
+NDRV_SAME_FIELD(GammaTbl, gDataCnt);
+NDRV_SAME_FIELD(GammaTbl, gDataWidth);
+static_assert(sizeof(Ndrv::GammaTbl) == 12 && __builtin_offsetof(Ndrv::GammaTbl, gDataCnt) == 8 &&
+              __builtin_offsetof(Ndrv::GammaTbl, gDataWidth) == 10,
+              "GammaTbl header is six 16-bit fields, 12 bytes");
+NDRV_SAME_SIZE(VDGammaRecord);
+NDRV_SAME_FIELD(VDGammaRecord, csGTable);
+NDRV_SAME_SIZE(VDGetGammaListRec);
+NDRV_SAME_FIELD(VDGetGammaListRec, csPreviousGammaTableID);
+NDRV_SAME_FIELD(VDGetGammaListRec, csGammaTableID);
+NDRV_SAME_FIELD(VDGetGammaListRec, csGammaTableSize);
+NDRV_SAME_FIELD(VDGetGammaListRec, csGammaTableName);
+NDRV_SAME_SIZE(VDRetrieveGammaRec);
+NDRV_SAME_FIELD(VDRetrieveGammaRec, csGammaTableID);
+NDRV_SAME_FIELD(VDRetrieveGammaRec, csGammaTablePtr);
+static_assert(Ndrv::cscGetGamma == ::cscGetGamma && Ndrv::cscGetGammaInfoList == ::cscGetGammaInfoList &&
+              Ndrv::cscRetrieveGammaTable == ::cscRetrieveGammaTable &&
+              Ndrv::kGammaTableIDFindFirst == static_cast<uint32_t>(::kGammaTableIDFindFirst) &&
+              Ndrv::kGammaTableIDNoMoreTables == static_cast<uint32_t>(::kGammaTableIDNoMoreTables) &&
+              Ndrv::kGammaHeaderSize == __builtin_offsetof(::GammaTbl, gFormulaData),
+              "gamma selectors and table IDs");
 
 namespace {
 
@@ -201,6 +231,12 @@ bool depth2Mode { false };
 // The OS's own HDR judgement never happens on this machine (no 'hdrm' is requested), so this is the way to ask
 // whether a 10-bit desktop can be held at all.
 bool depth10Only { false };
+// rdna4-gamma=1|2 (debug.rdna4_gamma at run time), docs/hdr-gamma.md: answer the NDRV's gamma selectors
+// (cscSetGamma 4, cscGetGamma 8, cscGetGammaInfoList 20, cscRetrieveGammaTable 21) with a linear ramp, so
+// IONDRVFramebuffer stops publishing the "no gamma" defaults IOFBGammaWidth 8 / IOFBGammaCount 256 that make
+// CoreDisplay refuse the plane an HDR capability. 1 = 10 bit / 1024 entries, 2 = 12 bit / 256. Default off:
+// a wrong answer here must not change the shipped boot.
+uint32_t gammaLevel { 0 };
 // A3 (rdna4-depth2=1): the colour-mode and colour-depth answers for the connection. What macOS set on this machine:
 // 'colr' = Auto|RGBLimited|RGB and ' bpc' = 6|8 (6 and 8 bits a component); both were refused, which is why the
 // display stayed 8 bpc even though the second depth is built (A2). These remember what was accepted.
@@ -318,6 +354,30 @@ void deviceSetScanoutDepth(void *ctx, uint16_t depth) {
 
 void deviceSetHdrMode(void *ctx, bool on) {
 	static_cast<RDNA4Device *>(ctx)->setScanoutHdr(on);
+}
+
+// rdna4-gamma=1: one line per gamma selector, with its arguments and the verdict. The numbers arrive as int32_t and
+// every conversion here is %d or 0x%x on an integer: no %s ever sees a number (AGENTS.md §一, the 2026-11-26 panic).
+void deviceGammaLog(void *ctx, Ndrv::GammaEvent ev, int32_t a, int32_t b, int32_t c, int32_t d, int32_t ret) {
+	(void)ctx;
+	switch (ev) {
+	case Ndrv::GammaEvent::Set:
+		FBLOG("gamma: cscSetGamma chan %d data %d width %d formula %d -> 0x%x", a, b, c, d,
+		      static_cast<unsigned>(ret));
+		break;
+	case Ndrv::GammaEvent::Get:
+		FBLOG("gamma: cscGetGamma table %d bytes (macOS %d) width %d entries %d -> 0x%x", a, b, c, d,
+		      static_cast<unsigned>(ret));
+		break;
+	case Ndrv::GammaEvent::List:
+		FBLOG("gamma: cscGetGammaInfoList after 0x%x -> id 0x%x size %d -> 0x%x", static_cast<unsigned>(a),
+		      static_cast<unsigned>(b), c, static_cast<unsigned>(ret));
+		break;
+	case Ndrv::GammaEvent::Retrieve:
+		FBLOG("gamma: cscRetrieveGammaTable id 0x%x copied %d bytes -> 0x%x", static_cast<unsigned>(a), b,
+		      static_cast<unsigned>(ret));
+		break;
+	}
 }
 
 void deviceSetPower(void *ctx, bool on) {
@@ -1412,7 +1472,7 @@ void attach(FbEntry &e) {
 	Ndrv::Backend be { &dev, deviceSurfaceFor, deviceSwitchTo, deviceSetPower,
 	                   deviceSupportsHardwareCursor, deviceSetHardwareCursor,
 	                   deviceDrawHardwareCursor, deviceGetHardwareCursorDrawState,
-	                   deviceSetScanoutDepth, deviceSetHdrMode };
+	                   deviceSetScanoutDepth, deviceSetHdrMode, deviceGammaLog };
 #ifdef AMDRadeonRDNA4_VM_TEST
 	if (!dev.isAmd) {
 		pci->setIOEnable(true);
@@ -1439,6 +1499,20 @@ void attach(FbEntry &e) {
 		st->ndrv.setDepth2(depth2Mode);
 		if (depth2Mode)
 			FBLOG("ndrv: rdna4-depth2=1: a second depth (30bpp) offered, kDepthMode2");
+	}
+	{
+		// rdna4-gamma=1|2 (docs/hdr-gamma.md): the gamma selectors. Sticky across the framebuffers: Trial::option
+		// consumes the armed variable, and a run-time debug.rdna4_gamma has to survive the next attach too.
+		uint32_t level = gammaLevel;
+
+		if (!level && Trial::option("rdna4-gamma", level) && level <= 2)
+			gammaLevel = level;
+		st->ndrv.setGammaOption(gammaLevel);
+		if (gammaLevel)
+			FBLOG("ndrv: rdna4-gamma=%u: answering cscGetGamma/cscGetGammaInfoList/cscRetrieveGammaTable with a "
+			      "%u bit, %u entry linear ramp", static_cast<unsigned>(gammaLevel),
+			      static_cast<unsigned>(st->ndrv.gammaOption() == 2 ? 12 : 10),
+			      static_cast<unsigned>(st->ndrv.gammaOption() == 2 ? 256 : 1024));
 	}
 #ifdef AMDRadeonRDNA4_PVGPU
 	// A test boot's level (rdna4-trial) is only known once NVRAM is; the heads' framebuffers are told before macOS asks.
@@ -2161,8 +2235,36 @@ void lateNdrvCheck(thread_call_param_t, thread_call_param_t) {
 	processKext(nullptr, *gPatcher, kextIONDRVSupport.loadIndex, ndrv->address, size);
 }
 
+// debug.rdna4_gamma: rdna4-gamma at run time (docs/hdr-gamma.md). 0 off — the four gamma selectors stay with
+// IOBootNDRV; 1|2 the translator answers them, and every framebuffer already attached switches over now. What the
+// running framebuffer has already published (IOFBGammaWidth/Count) follows at the next checkDriver, i.e. at the next
+// open, which is why the boot arg is the form that matters for a measurement.
+static int gammaSysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int value = static_cast<int>(gammaLevel);
+	int err = sysctl_handle_int(oidp, &value, 0, req);
+
+	if (err || !req->newptr)
+		return err;
+	if (value < 0 || value > 2)
+		return EINVAL;
+	gammaLevel = static_cast<uint32_t>(value);
+	for (auto &e : fbTable)
+		if (e.state)
+			e.state->ndrv.setGammaOption(gammaLevel);
+	FBLOG("gamma: debug.rdna4_gamma=%d: %s", value,
+	      value ? "the gamma selectors are answered with a linear ramp from now on"
+	            : "the gamma selectors go back to IOBootNDRV");
+	return 0;
+}
+
+SYSCTL_PROC(_debug, OID_AUTO, rdna4_gamma, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, gammaSysctl, "I",
+            "AMDRadeonRDNA4: rdna4-gamma: 0 off (default, the NDRV gamma selectors stay with IOBootNDRV); 1 answer them with a 10 bit / 1024 entry linear ramp; 2 the same at 12 bit / 256 entries");
+
 void pluginStart() {
 	rdna4LogInit();
+	sysctl_register_oid(&sysctl__debug_rdna4_gamma);
 	FBLOG("version " AMDRADEONRDNA4_BUILD);
 	uint32_t off = 0;
 	if (PE_parse_boot_argn("rdna4-off", &off, sizeof(off)) && off) {

@@ -155,10 +155,36 @@ bool Translator::surface(const Modes::Mode &m, Surface &out) const {
 }
 
 bool Translator::status(uint16_t code, void *params, int32_t &ret) {
-	if (!params)
+	if (!params) {
+		// rdna4-gamma: a gamma request without a record is answered (and refused) rather than passed on, so one log
+		// line names it instead of IOBootNDRV's silence.
+		if (gamma && (code == cscGetGamma || code == cscGetGammaInfoList ||
+		              code == cscRetrieveGammaTable)) {
+			ret = kBadArgument;
+			gammaEvent(code == cscGetGamma ? GammaEvent::Get :
+			           code == cscGetGammaInfoList ? GammaEvent::List : GammaEvent::Retrieve,
+			           0, 0, 0, 0, ret);
+			return true;
+		}
 		return false;
+	}
 	const bool haveModes = count != 0;
 	switch (code) {
+	case cscGetGamma:
+		if (!gamma)
+			return false;
+		ret = gammaGet(*static_cast<VDGammaRecord *>(params));
+		return true;
+	case cscGetGammaInfoList:
+		if (!gamma)
+			return false;
+		ret = gammaList(*static_cast<VDGetGammaListRec *>(params));
+		return true;
+	case cscRetrieveGammaTable:
+		if (!gamma)
+			return false;
+		ret = gammaRetrieve(*static_cast<VDRetrieveGammaRec *>(params));
+		return true;
 	case cscGetCurMode:
 		if (!haveModes)
 			return false;
@@ -225,9 +251,20 @@ bool Translator::status(uint16_t code, void *params, int32_t &ret) {
 }
 
 bool Translator::control(uint16_t code, void *params, int32_t &ret) {
-	if (!params)
+	if (!params) {
+		if (gamma && code == cscSetGamma) {
+			ret = kBadArgument;
+			gammaEvent(GammaEvent::Set, 0, 0, 0, 0, ret);
+			return true;
+		}
 		return false;
+	}
 	switch (code) {
+	case cscSetGamma:
+		if (!gamma)
+			return false;
+		ret = gammaSet(*static_cast<const VDGammaRecord *>(params));
+		return true;
 	case cscSwitchMode:
 		if (!count)
 			return false;
@@ -455,6 +492,148 @@ int32_t Translator::setSync(const VDSyncInfoRec &r) {
 	syncState = next;
 	if (on != wasOn)
 		be.setPower(be.ctx, on);
+	return kSuccess;
+}
+
+// --- gamma (docs/hdr-gamma.md) -----------------------------------------------
+
+void Translator::setGammaOption(uint32_t level) {
+	gammaLevel = level <= 2 ? level : 1;
+	gamma = gammaLevel != 0;
+	gammaFromMacOS = false;
+	gammaListSize = 0;
+	if (!gamma) {
+		gammaLen = 0;
+		return;
+	}
+	// 12 bit / 256 entries is the shape Apple's own AMD framebuffer advertises
+	// (AMDFramebuffer::initializeDriverResources -> getGammaParameters: 3 channels, 256 values, 12 bits);
+	// 10 bit / 1024 is Intel's modern one and the shape a 10 bpc plane wants. Both fit gammaTable.
+	gammaDataWidth = gammaLevel == 2 ? 12 : kGammaDataWidth;
+	gammaEntries   = gammaLevel == 2 ? 256 : kGammaEntries;
+	buildGammaRamp();
+}
+
+// The linear (identity) ramp: value i of a channel is i scaled to the table's
+// width, so the table describes "this plane passes its input through" — the
+// only thing that is true of a plane whose gamma is not programmed. Two bytes a
+// value (the SDK: dataWidth > 8 means one or two bytes an entry), little endian,
+// in the order the kernel expects: R, then G, then B.
+void Translator::buildGammaRamp() {
+	auto *h = gammaHeader();
+	h->gVersion     = static_cast<int16_t>(kGammaVersion);
+	h->gType        = 0;   // 0 = the ramp is the CLUT/linearisation data, not a colour-managed correction
+	h->gFormulaSize = 0;
+	h->gChanCnt     = static_cast<int16_t>(kGammaChannels);
+	h->gDataCnt     = static_cast<int16_t>(gammaEntries);
+	h->gDataWidth   = static_cast<int16_t>(gammaDataWidth);
+	uint8_t *p = gammaTable + kGammaHeaderSize;
+	const uint32_t max = (1u << gammaDataWidth) - 1u;
+	for (uint16_t ch = 0; ch < kGammaChannels; ch++) {
+		for (uint16_t i = 0; i < gammaEntries; i++) {
+			// i * max / (entries - 1), rounded: 0 at 0, max at the last entry, monotonic in between.
+			const uint32_t v = gammaEntries > 1
+				? (static_cast<uint32_t>(i) * max + (gammaEntries - 1) / 2) / (gammaEntries - 1)
+				: max;
+			p[0] = static_cast<uint8_t>(v & 0xFF);
+			p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+			p += 2;
+		}
+	}
+	gammaLen = static_cast<uint16_t>(kGammaHeaderSize +
+	                                 static_cast<size_t>(kGammaChannels) * gammaEntries * 2);
+}
+
+// cscGetGamma: IONDRVFramebuffer::checkDriver reads gDataCnt and gDataWidth out
+// of this table into IOFBGammaCount and IOFBGammaWidth (0x1475c9a4-0x1475c9cb).
+// The pointer stays valid for the life of the framebuffer — it is our own array.
+int32_t Translator::gammaGet(VDGammaRecord &r) const {
+	r.csGTable = const_cast<uint8_t *>(gammaTable);
+	gammaEvent(GammaEvent::Get, gammaLen, gammaFromMacOS ? 1 : 0, gammaDataWidth,
+	           gammaEntries, kSuccess);
+	return kSuccess;
+}
+
+// cscGetGammaInfoList: one table, ID 0, then kGammaTableIDNoMoreTables. The
+// kernel loops until it sees that ID or an error (0x1475ca42), so the second
+// answer is what ends the loop — a selector that always reported a table would
+// hang checkDriver.
+int32_t Translator::gammaList(VDGetGammaListRec &r) {
+	const uint32_t previous = r.csPreviousGammaTableID;
+	if (previous == kGammaTableIDFindFirst) {
+		r.csGammaTableID   = kGammaTableIDSpecific;
+		r.csGammaTableSize = gammaLen;
+		// csGammaTableName is left alone: the kernel points it at a stack buffer and never reads it back.
+		gammaListSize = gammaLen;
+		gammaEvent(GammaEvent::List, static_cast<int32_t>(previous),
+		           static_cast<int32_t>(r.csGammaTableID), static_cast<int32_t>(r.csGammaTableSize),
+		           0, kSuccess);
+		return kSuccess;
+	}
+	r.csGammaTableID   = kGammaTableIDNoMoreTables;
+	r.csGammaTableSize = 0;
+	gammaEvent(GammaEvent::List, static_cast<int32_t>(previous),
+	           static_cast<int32_t>(r.csGammaTableID), 0, 0, kSuccess);
+	return kSuccess;
+}
+
+// cscRetrieveGammaTable: the kernel allocated csGammaTableSize bytes from what
+// the list said (0x1475ca4b) and asks for that table. The copy is bounded by
+// the size the list advertised, never by the record's silence about its buffer.
+int32_t Translator::gammaRetrieve(VDRetrieveGammaRec &r) const {
+	if (r.csGammaTableID != kGammaTableIDSpecific) {
+		gammaEvent(GammaEvent::Retrieve, static_cast<int32_t>(r.csGammaTableID), 0, 0, 0, kBadArgument);
+		return kBadArgument;
+	}
+	// gammaListSize is the only bound we have for the caller's buffer, so a retrieve is answered only for the table
+	// the enumeration described, and only while the table is at least that long (setGammaOption can shorten it).
+	if (!r.csGammaTablePtr || !gammaListSize || gammaListSize > gammaLen ||
+	    gammaListSize > sizeof(gammaTable)) {
+		gammaEvent(GammaEvent::Retrieve, static_cast<int32_t>(r.csGammaTableID), 0, gammaListSize, gammaLen,
+		           kUnsupported);
+		return kUnsupported;
+	}
+	uint8_t *dst = static_cast<uint8_t *>(r.csGammaTablePtr);
+	for (uint16_t i = 0; i < gammaListSize; i++)
+		dst[i] = gammaTable[i];
+	gammaEvent(GammaEvent::Retrieve, static_cast<int32_t>(r.csGammaTableID),
+	           static_cast<int32_t>(gammaListSize), 0, 0, kSuccess);
+	return kSuccess;
+}
+
+// cscSetGamma: IONDRVFramebuffer::setGammaTable has already written a GammaTbl
+// header in front of the values (0x1475e848-0x1475e862), so csGTable is a
+// complete table. Keep it, bounded: anything that does not fit, or that is not a
+// table this driver could have produced, is refused and changes nothing.
+int32_t Translator::gammaSet(const VDGammaRecord &r) {
+	if (!r.csGTable) {
+		gammaEvent(GammaEvent::Set, 0, 0, 0, 0, kBadArgument);
+		return kBadArgument;
+	}
+	const auto *t = static_cast<const GammaTbl *>(r.csGTable);
+	const int32_t chanCnt     = t->gChanCnt;
+	const int32_t dataCnt     = t->gDataCnt;
+	const int32_t dataWidth   = t->gDataWidth;
+	const int32_t formulaSize = t->gFormulaSize;
+	const int32_t version     = t->gVersion;
+	const size_t bytes = chanCnt > 0 && dataCnt > 0
+		? kGammaHeaderSize + static_cast<size_t>(chanCnt) * static_cast<size_t>(dataCnt) *
+		                     static_cast<size_t>(dataWidth > 8 ? 2 : 1)
+		: 0;
+	if (version != kGammaVersion || formulaSize != 0 || chanCnt < 1 || chanCnt > kGammaChannels ||
+	    dataCnt < 1 || dataCnt > kGammaEntries || dataWidth < 8 || dataWidth > 16 ||
+	    bytes > sizeof(gammaTable)) {
+		gammaEvent(GammaEvent::Set, chanCnt, dataCnt, dataWidth, formulaSize, kBadArgument);
+		return kBadArgument;
+	}
+	const auto *src = static_cast<const uint8_t *>(r.csGTable);
+	for (size_t i = 0; i < bytes; i++)
+		gammaTable[i] = src[i];
+	gammaLen = static_cast<uint16_t>(bytes);
+	gammaDataWidth = static_cast<uint16_t>(dataWidth);
+	gammaEntries = static_cast<uint16_t>(dataCnt);
+	gammaFromMacOS = true;
+	gammaEvent(GammaEvent::Set, chanCnt, dataCnt, dataWidth, formulaSize, kSuccess);
 	return kSuccess;
 }
 

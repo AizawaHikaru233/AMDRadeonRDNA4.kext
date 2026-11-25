@@ -2808,8 +2808,25 @@ struct FakeBackend {
 		b->powerCalls++;
 		b->powerOn = on;
 	}
+	// rdna4-gamma=1: what the translator logged about a gamma selector (docs/hdr-gamma.md).
+	int             gammaEvents = 0;
+	Ndrv::GammaEvent gammaEvent {};
+	int32_t          gammaArgs[4] {};
+	int32_t          gammaRet = 0;
+	static void gammaLog(void *ctx, Ndrv::GammaEvent ev, int32_t a, int32_t b, int32_t c, int32_t d,
+	                     int32_t ret) {
+		auto *bk = static_cast<FakeBackend *>(ctx);
+		bk->gammaEvents++;
+		bk->gammaEvent = ev;
+		bk->gammaArgs[0] = a;
+		bk->gammaArgs[1] = b;
+		bk->gammaArgs[2] = c;
+		bk->gammaArgs[3] = d;
+		bk->gammaRet = ret;
+	}
 	Ndrv::Backend backend() {
-		return { this, surfaceFor, switchTo, setPower };
+		return { this, surfaceFor, switchTo, setPower, nullptr, nullptr, nullptr, nullptr, nullptr,
+		         nullptr, gammaLog };
 	}
 };
 
@@ -3041,10 +3058,183 @@ static int testNdrv() {
 	                  "ndrv: DPMS on");
 
 	// Everything else stays with IOBootNDRV.
-	failures += check(!tr.status(8 /* cscGetGamma */, &sy, ret) &&
+	failures += check(!tr.status(Ndrv::cscGetGamma, &sy, ret) &&
 	                  !tr.control(3 /* cscSetEntries */, &sy, ret) &&
 	                  !tr.status(Ndrv::cscGetCurMode, nullptr, ret),
 	                  "ndrv: answered a request it does not own");
+
+	// --- gamma (docs/hdr-gamma.md) -----------------------------------------
+	// Layout first: IONDRVFramebuffer::checkDriver loads gDataCnt at +8 and gDataWidth at +0xa with 16-bit signed
+	// loads (0x1475c9a4) and IONDRVFramebuffer::setGammaTable writes the same six fields into the buffer it is given
+	// (0x1475e848), so the mirror must be the SDK's struct, not a guess.
+	failures += check(sizeof(Ndrv::GammaTbl) == 12 && offsetof(Ndrv::GammaTbl, gDataCnt) == 8 &&
+	                  offsetof(Ndrv::GammaTbl, gDataWidth) == 10 &&
+	                  sizeof(Ndrv::VDGammaRecord) == 8 &&
+	                  sizeof(Ndrv::VDGetGammaListRec) == 24 &&
+	                  offsetof(Ndrv::VDGetGammaListRec, csGammaTableName) == 16 &&
+	                  sizeof(Ndrv::VDRetrieveGammaRec) == 16 &&
+	                  offsetof(Ndrv::VDRetrieveGammaRec, csGammaTablePtr) == 8,
+	                  "gamma: record layouts %zu/%zu/%zu", sizeof(Ndrv::GammaTbl),
+	                  sizeof(Ndrv::VDGetGammaListRec), sizeof(Ndrv::VDRetrieveGammaRec));
+
+	// Off (the default): all four selectors stay with IOBootNDRV, and nothing is logged for them.
+	Ndrv::VDGammaRecord gam {};
+	Ndrv::VDGetGammaListRec glist {};
+	Ndrv::VDRetrieveGammaRec gretr {};
+	const int gammaEventsBefore = fb.gammaEvents;
+	failures += check(!tr.status(Ndrv::cscGetGamma, &gam, ret) &&
+	                  !tr.status(Ndrv::cscGetGammaInfoList, &glist, ret) &&
+	                  !tr.status(Ndrv::cscRetrieveGammaTable, &gretr, ret) &&
+	                  !tr.control(Ndrv::cscSetGamma, &gam, ret) && fb.gammaEvents == gammaEventsBefore,
+	                  "gamma: off hands the selectors back to IOBootNDRV");
+
+	// On: cscGetGamma answers one table, and that answer is the whole point — an empty answer here is what makes
+	// checkDriver publish IOFBGammaWidth 8 / IOFBGammaCount 256.
+	tr.setGammaOption(1);
+	gam = {};
+	failures += check(tr.status(Ndrv::cscGetGamma, &gam, ret) && ret == Ndrv::kSuccess && gam.csGTable,
+	                  "gamma: cscGetGamma answered 0x%x", ret);
+	const auto *tbl = static_cast<const Ndrv::GammaTbl *>(gam.csGTable);
+	failures += check(tbl->gVersion == 0 && tbl->gType == 0 && tbl->gFormulaSize == 0 &&
+	                  tbl->gChanCnt == 3 && tbl->gDataCnt == 1024 && tbl->gDataWidth == 10,
+	                  "gamma: table %d/%d/%d/%d/%d/%d", tbl->gVersion, tbl->gType, tbl->gFormulaSize,
+	                  tbl->gChanCnt, tbl->gDataCnt, tbl->gDataWidth);
+	// The values: a linear ramp per channel, 2 bytes each, 0 at 0 and 1023 at the last entry.
+	{
+		const auto *v = reinterpret_cast<const uint8_t *>(gam.csGTable);
+		const size_t bytes = 12 + 3u * 1024u * 2u;
+		bool monotonic = true, endsOk = true;
+		for (int ch = 0; ch < 3; ch++) {
+			uint32_t prev = 0;
+			for (int i = 0; i < 1024; i++) {
+				const uint8_t *p = v + 12 + (static_cast<size_t>(ch) * 1024 + i) * 2;
+				const uint32_t value = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8);
+				monotonic &= value >= prev;
+				prev = value;
+				if (i == 0)
+					endsOk &= value == 0;
+				if (i == 1023)
+					endsOk &= value == 1023;
+			}
+		}
+		failures += check(bytes == 6156 && Ndrv::kGammaTableBytes == 6156 && monotonic && endsOk,
+		                  "gamma: 10 bit ramp %zu bytes, first 0..last 1023 %d, monotonic %d",
+		                  Ndrv::kGammaTableBytes, endsOk, monotonic);
+	}
+
+	// The enumeration: one table, then kGammaTableIDNoMoreTables — the second answer is what ends checkDriver's
+	// loop (0x1475ca42); a selector that always reported a table would spin there.
+	glist = { Ndrv::kGammaTableIDFindFirst, 0, 0, nullptr };
+	const uint32_t listedSize = (tr.status(Ndrv::cscGetGammaInfoList, &glist, ret) &&
+	                             ret == Ndrv::kSuccess) ? glist.csGammaTableSize : 0;
+	failures += check(listedSize == 6156 && glist.csGammaTableID == Ndrv::kGammaTableIDSpecific,
+	                  "gamma: list after FindFirst -> id 0x%x size %u", glist.csGammaTableID, listedSize);
+	glist.csPreviousGammaTableID = glist.csGammaTableID;   // what checkDriver does between its two calls
+	failures += check(tr.status(Ndrv::cscGetGammaInfoList, &glist, ret) &&
+	                  ret == Ndrv::kSuccess && glist.csGammaTableID == Ndrv::kGammaTableIDNoMoreTables &&
+	                  glist.csGammaTableSize == 0,
+	                  "gamma: list after id 0 -> end 0x%x", glist.csGammaTableID);
+
+	// The retrieve copies exactly what the list advertised, and refuses anything else — including a null buffer,
+	// which is never written through. checkDriver's order is list(FindFirst) -> retrieve(id) -> list(id) -> end, so
+	// the retrieve is asked here between the two list calls, and once more after the end: the description of the
+	// table does not depend on where in the enumeration the question is put.
+	uint8_t listed[6156] {};
+	gretr = { Ndrv::kGammaTableIDSpecific, listed };
+	bool copies = tr.status(Ndrv::cscRetrieveGammaTable, &gretr, ret) && ret == Ndrv::kSuccess &&
+	              memcmp(listed, gam.csGTable, sizeof(listed)) == 0;
+	gretr = { 7, listed };
+	copies &= tr.status(Ndrv::cscRetrieveGammaTable, &gretr, ret) && ret == Ndrv::kBadArgument;
+	gretr = { Ndrv::kGammaTableIDSpecific, nullptr };
+	copies &= tr.status(Ndrv::cscRetrieveGammaTable, &gretr, ret) && ret != Ndrv::kSuccess;
+	gretr = { Ndrv::kGammaTableIDSpecific, listed };
+	copies &= tr.status(Ndrv::cscRetrieveGammaTable, &gretr, ret) && ret == Ndrv::kSuccess &&
+	          memcmp(listed, gam.csGTable, sizeof(listed)) == 0;
+	failures += check(copies, "gamma: retrieve copies the table, refuses id 7 and a null buffer");
+
+	// cscSetGamma: the kernel has already written the header in front of the values, so this is a whole table. An
+	// 8 bit / 256 entry one (what a legacy WindowServer sends) is taken and becomes the answer of cscGetGamma.
+	alignas(8) uint8_t eightBit[12 + 3 * 256] {};
+	auto *eight = reinterpret_cast<Ndrv::GammaTbl *>(eightBit);
+	eight->gChanCnt = 3;
+	eight->gDataCnt = 256;
+	eight->gDataWidth = 8;
+	for (size_t i = 0; i < 3 * 256; i++)
+		eightBit[12 + i] = static_cast<uint8_t>(i);
+	Ndrv::VDGammaRecord eightRec { eightBit };
+	failures += check(tr.control(Ndrv::cscSetGamma, &eightRec, ret) && ret == Ndrv::kSuccess &&
+	                  fb.gammaEvent == Ndrv::GammaEvent::Set && fb.gammaArgs[0] == 3 &&
+	                  fb.gammaArgs[1] == 256 && fb.gammaArgs[2] == 8 && fb.gammaRet == Ndrv::kSuccess,
+	                  "gamma: cscSetGamma 8 bit / 256 taken (log %d: %d %d %d)", fb.gammaEvents,
+	                  fb.gammaArgs[0], fb.gammaArgs[1], fb.gammaArgs[2]);
+	gam = {};
+	const bool storedOk = tr.status(Ndrv::cscGetGamma, &gam, ret) && ret == Ndrv::kSuccess && gam.csGTable &&
+	                      static_cast<const Ndrv::GammaTbl *>(gam.csGTable)->gDataCnt == 256 &&
+	                      static_cast<const Ndrv::GammaTbl *>(gam.csGTable)->gDataWidth == 8 &&
+	                      memcmp(gam.csGTable, eightBit, sizeof(eightBit)) == 0;
+	failures += check(storedOk, "gamma: what macOS set is what cscGetGamma hands back");
+	// ... and the enumeration follows it, so the size the kernel allocates for the retrieve matches.
+	glist = { Ndrv::kGammaTableIDFindFirst, 0, 0, nullptr };
+	failures += check(tr.status(Ndrv::cscGetGammaInfoList, &glist, ret) &&
+	                  glist.csGammaTableSize == sizeof(eightBit),
+	                  "gamma: list follows the set table (%u bytes)", glist.csGammaTableSize);
+
+	// Oversized and malformed sets are refused and change nothing: gDataCnt past the 1024 entries, a formula
+	// section, a version that is not 0, a channel count of 4, and a null record.
+	alignas(8) uint8_t tooBig[12] {};
+	auto *big = reinterpret_cast<Ndrv::GammaTbl *>(tooBig);
+	big->gChanCnt = 3;
+	big->gDataCnt = 4096;
+	big->gDataWidth = 16;
+	Ndrv::VDGammaRecord badRec { tooBig };
+	const bool refused = tr.control(Ndrv::cscSetGamma, &badRec, ret) && ret == Ndrv::kBadArgument;
+	big->gDataCnt = 256;
+	big->gDataWidth = 8;
+	big->gFormulaSize = 4;
+	const bool refusedFormula = tr.control(Ndrv::cscSetGamma, &badRec, ret) && ret == Ndrv::kBadArgument;
+	big->gFormulaSize = 0;
+	big->gChanCnt = 4;
+	const bool refusedChannels = tr.control(Ndrv::cscSetGamma, &badRec, ret) && ret == Ndrv::kBadArgument;
+	big->gChanCnt = 3;
+	big->gVersion = 1;
+	const bool refusedVersion = tr.control(Ndrv::cscSetGamma, &badRec, ret) && ret == Ndrv::kBadArgument;
+	Ndrv::VDGammaRecord nullRec { nullptr };
+	const bool refusedNull = tr.control(Ndrv::cscSetGamma, &nullRec, ret) && ret == Ndrv::kBadArgument;
+	gam = {};
+	const bool unchanged = tr.status(Ndrv::cscGetGamma, &gam, ret) &&
+	                       static_cast<const Ndrv::GammaTbl *>(gam.csGTable)->gDataCnt == 256 &&
+	                       static_cast<const Ndrv::GammaTbl *>(gam.csGTable)->gDataWidth == 8;
+	failures += check(refused && refusedFormula && refusedChannels && refusedVersion && refusedNull && unchanged,
+	                  "gamma: bad setGamma refused (%d %d %d %d %d) and the table unchanged %d", refused,
+	                  refusedFormula, refusedChannels, refusedVersion, refusedNull, unchanged);
+	// A gamma request without a record is answered (one log line), not passed on.
+	failures += check(tr.status(Ndrv::cscGetGamma, nullptr, ret) && ret == Ndrv::kBadArgument &&
+	                  tr.control(Ndrv::cscSetGamma, nullptr, ret) && ret == Ndrv::kBadArgument,
+	                  "gamma: a null record is refused, not passed on");
+
+	// 2 = the other shape Apple's drivers publish: 12 bit, 256 entries (AMDFramebuffer's getGammaParameters).
+	tr.setGammaOption(2);
+	gam = {};
+	const auto *wide = tr.status(Ndrv::cscGetGamma, &gam, ret)
+		? static_cast<const Ndrv::GammaTbl *>(gam.csGTable) : nullptr;
+	bool wideShape = wide && wide->gDataCnt == 256 && wide->gDataWidth == 12;
+	bool wideEnds = false;
+	uint32_t wideList = 0;
+	if (wideShape) {
+		const auto *v = reinterpret_cast<const uint8_t *>(gam.csGTable);
+		const uint32_t first = static_cast<uint32_t>(v[12]) | (static_cast<uint32_t>(v[13]) << 8);
+		const size_t last = 12 + (3u * 256u - 1u) * 2u;   // the last value of the last channel
+		const uint32_t lastValue = static_cast<uint32_t>(v[last]) | (static_cast<uint32_t>(v[last + 1]) << 8);
+		wideEnds = first == 0 && lastValue == 4095;
+		glist = { Ndrv::kGammaTableIDFindFirst, 0, 0, nullptr };
+		if (tr.status(Ndrv::cscGetGammaInfoList, &glist, ret))
+			wideList = glist.csGammaTableSize;
+	}
+	failures += check(wideShape && wideEnds && wideList == 12 + 3 * 256 * 2,
+	                  "gamma: rdna4-gamma=2 is 12 bit / 256 entries (%d %d, ends %d, list %u)",
+	                  wide ? wide->gDataCnt : -1, wide ? wide->gDataWidth : -1, wideEnds, wideList);
+	tr.setGammaOption(0);
+	failures += check(!tr.status(Ndrv::cscGetGamma, &gam, ret), "gamma: turning the option off again");
 
 	// Without a mode table only the connection, EDID and sync requests are
 	// answered.
