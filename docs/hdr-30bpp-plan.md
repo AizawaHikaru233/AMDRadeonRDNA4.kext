@@ -400,23 +400,36 @@ for i in range(n.value):
 PY
 ```
 
-## The IOFBTimingRange attempt, and why it is withdrawn (2026-11-26 00:30)
+## The IOFBTimingRange attempt of 2026-11-26 00:30: withdrawn, but for a different reason than first written
 
-Publishing an `IODisplayTimingRangeV2` under `kIOFBTimingRangeKey` on the framebuffer (the NVIDIA
-mechanism, doc §2) **panics this machine**: three identical `type = 14=page fault` panics with
-`CR2 = 0x17d7840` = 25,000,000 = the `minPixelClock` we put in the structure — the kernel used a clock
-value from our blob as an address. Recovery and the panic reports: `hw-logs/panics-20261126/`.
+**Corrected 04:40.** The first version of this section said the kernel had dereferenced our
+`minPixelClock` and that the blob's layout was therefore wrong. That was wrong. The panic backtrace
+(`hw-logs/panics-20261126/`) is
 
-So the mechanism is right in principle (NVIDIA does it, and it is how macOS learns it may program HDR10
-timings) but **the exact structure/layout this build expects is not the V2 blob we built**. Before a
-second attempt:
+```
+_mac_schedule_telemetry (RIP, the faulting load) <- _vsnprintf <- rdna4Log <- attach(FbEntry&) <- wrapDoDriverIO
+  CR2 = RAX = 0x17d7840 = 25,000,000
+```
 
-- the property has to be produced by whatever `IONDRVFramebuffer`/`IOFramebuffer` itself would publish, or
-- the structure version must be taken from what this build's `IOFramebuffer::getTimingRange` reads
-  (disassembly), and
-- the attempt has to be made **without the risk of a boot loop**: e.g. only when a test boot's option is
-  armed *and* with a fallback that can be undone without physical access (the kext disabled by the user
-  was what made recovery possible).
+i.e. a **`%s` conversion in one of our own log lines consumed a number as a `char *`**, inside
+`attach`, on every boot with `rdna4-hdr=1`. No kernel frame read the published structure. The property
+was never exercised, never accepted, never rejected.
 
-Until then the HDR route stops at A6 (full EDID) + A7 (the OS verdict: `supportsHDR=False` at
-2026-11-26 00:03, measured in a logged-in session).
+What follows from that:
+
+- **`kIOFBTimingRangeKey` is not proven dangerous.** The reason the route is still withdrawn is that it
+  is *unproven in both directions*: this build's contract for it (NDRV `cscGetTimingRanges`, status
+  0x1e, a 240-byte V1 record; the 312-byte V2 shape Apple's own framebuffers publish) is being reversed
+  in `docs/hdr-timingrange-reverse.md`, and nothing in this project has yet shown the record reaching
+  whatever consumes it.
+- **A fatal class of bug lives in our log calls.** `rdna4Log` carries `format(printf,1,2)`, yet a
+  mismatch still shipped: a `%s` fed with an integer faults in the kernel and takes WindowServer with
+  it. Any log line added around a new mechanism is code under review, and a panic whose backtrace ends
+  in `rdna4Log`/`vsnprintf` is a format bug, not evidence about the mechanism.
+- If the property is tried again: make the attempt survivable without physical access (the kext's
+  `Kernel -> Add` had to be disabled by hand to boot), and keep the diagnostic out of the same call as
+  the publication.
+
+Meanwhile the HDR route taken is A8 (`docs/hdr-a8-mode-colour.md`): HDR10 variants in the mode table
+plus the `getTimingInfoForDisplayMode` colour hook, no new property. A7 stands: the OS verdict was
+`supportsHDR=False` at 2026-11-26 00:03, measured in a logged-in session.
