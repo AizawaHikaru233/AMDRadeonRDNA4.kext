@@ -3025,6 +3025,17 @@ bool RDNA4Device::readBootDpLink(DpTrain::Sink &sink, DpTrain::Link &link) {
 		FBLOG("dptrain: the sink's DPCD did not answer on AUX%u", sinkAuxInst);
 		return false;
 	}
+	// DSC: the capability registers live at 0x00060..0x0006b (DP 1.4). Read them with the rest: a 4K mode above
+	// the link's own 8 bpc budget can only be offered if the sink answers here.
+	uint8_t dsc[16] {};
+	const bool dscRead = dpcdRead(sinkAuxInst, 0x060, dsc, sizeof(dsc));
+	if (dscRead)
+		FBLOG("dptrain: sink DSC 0x060..0x06f: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x (%s)",
+		      dsc[0], dsc[1], dsc[2], dsc[3], dsc[4], dsc[5], dsc[6], dsc[7], dsc[8], dsc[9], dsc[10], dsc[11],
+		      dsc[12], dsc[13], dsc[14], dsc[15],
+		      (dsc[0] & 1) ? "DSC supported" : "no DSC in 0x060");
+	else
+		FBLOG("dptrain: sink DSC caps at 0x060 did not read on AUX%u", sinkAuxInst);
 	const bool parsed = DpTrain::parseCaps(caps, sizeof(caps), sink);
 	link = DpTrain::Link { static_cast<uint8_t>(set[1] & 0x1f), set[0] };
 	FBLOG("dptrain: sink DPCD %u.%u, up to %u lane(s) at rate 0x%02x%s%s, reading interval 0x%02x; the firmware's "

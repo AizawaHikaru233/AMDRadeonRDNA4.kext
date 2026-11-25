@@ -1,0 +1,12 @@
+# 2026-11-25 sink capabilities on the card (RX 9070 XT, TCL 32X3B over DisplayPort)
+# kext 0.5.0 + devel/hdr-30bpp (device.cpp: DPCD 0x060..0x06f dump added)
+
+AMDRadeonRDNA4: edid: connector 0 (AUX0): TCL product 0x2014 EDID 1.4
+AMDRadeonRDNA4: edid: connector 0 (AUX0): preferred 3840x2160@59.996Hz pclk=533250kHz h(blank=160 fp=48 sw=32 +) v(blank=62 fp=3 sw=5 -)
+AMDRadeonRDNA4: edid: connector 0 (AUX0): read extension block (tag 0x02)
+AMDRadeonRDNA4: edid: AUX0: extension block 2 (tag 0x70, checksum ok): 5 DisplayID timing(s)
+AMDRadeonRDNA4: dptrain: sink DSC 0x060..0x06f: 01 21 03 7f 3b 07 01 00 00 1f 0e 11 08 00 00 04 (DSC supported)
+AMDRadeonRDNA4: dptrain: sink DPCD 1.2, up to 4 lane(s) at rate 0x14, TPS3, TPS4, reading interval 0x81; the firmware's link: 4 lane(s) at rate 0x14 (LANE_COUNT_SET 0x84); lanes 77 77, aligned 1
+AMDRadeonRDNA4: modes: DisplayPort modes up to 650000 kHz (link 4 lane(s) at 0x14: 720000 kHz at 8 bpc; DISPCLK 650000 kHz; boot 533234 kHz)
+AMDRadeonRDNA4: dptrain: sink DSC 0x060..0x06f: 01 21 03 7f 3b 07 01 00 00 1f 0e 11 08 00 00 04 (DSC supported)
+AMDRadeonRDNA4: dptrain: sink DPCD 1.2, up to 4 lane(s) at rate 0x14, TPS3, TPS4, reading interval 0x81; the firmware's link: 4 lane(s) at rate 0x14 (LANE_COUNT_SET 0x84); lanes 77 77, aligned 1
