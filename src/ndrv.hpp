@@ -258,6 +258,8 @@ struct Backend {
 	int32_t (*setHardwareCursor)(void *ctx, void *cursorRef);
 	int32_t (*drawHardwareCursor)(void *ctx, int32_t x, int32_t y, uint32_t visible);
 	int32_t (*getHardwareCursorDrawState)(void *ctx, VDHardwareCursorDrawStateRec &state);
+	// The depth a switch selected (kDepthMode1 = 128, kDepthMode2 = 129): the plane's pixel format follows it.
+	void (*setScanoutDepth)(void *ctx, uint16_t depth);
 };
 
 class Translator {

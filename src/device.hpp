@@ -63,6 +63,9 @@ public:
 	const Edid::DetailedTiming *liveMode() const { return liveTimingValid ? &liveTiming : nullptr; }
 	uint32_t            fbRowBytes { 0 };
 	uint32_t            fbDepth    { 32 };
+	// rdna4-depth2=1 (A3): the framebuffer is in the second depth, so the plane reads ARGB2101010 (0xa) instead of
+	// ARGB8888 (0x8). Kept across mode sets: applyMode re-applies it after applyPanelRotation.
+	bool                scanout10bpc { false };
 
 	// EDID of the boot display's sink: base block plus one CTA extension if
 	// present. 0 length = no DDC sink found.
@@ -336,6 +339,8 @@ public:
 	// are enabled only by rdna4-cursor=1; the default remains software cursor.
 	bool supportsHardwareCursor() const { return hwCursorReady; }
 	bool ndrvHardwareCursor() const { return hwCursorReady && ndrvCursorRequested; }   // IONDRV's cscSupportsHardwareCursor: rdna4-cursor=1 only
+	void setScanoutDepth(uint16_t depth);   // cscSwitchMode's depth: the plane's format follows it
+	bool applyScanoutFormat();              // program HUBP and DPP surface format for scanout10bpc
 	IOReturn setHardwareCursor(void *cursorRef);
 	IOReturn drawHardwareCursor(int32_t x, int32_t y, uint32_t visible);
 	// The paravirtual display's cursor (PvScanout::cursorImage): straight ARGB pixels, `pitch` pixels a row, at most 64x64.

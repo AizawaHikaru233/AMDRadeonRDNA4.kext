@@ -3494,7 +3494,50 @@ IOReturn RDNA4Device::applyMode(const Modes::Mode &m) {
 	const IOReturn ret = applyModeRaw(m);
 
 	applyPanelRotation();
+	if (scanout10bpc)
+		applyScanoutFormat();   // a mode set reprograms the plane's format: the depth the OS switched to wins
 	return ret;
+}
+
+// The plane's pixel format follows the depth the OS switched the framebuffer to (cscSwitchMode's csMode): ARGB2101010
+// for the second depth, ARGB8888 otherwise. The formats are the values the Linux tables write (tools/gen/pipegen:
+// hubp*_program_pixel_format masks 0x7f, value 0x8); the rotation angle in bits [9:8] is left alone.
+bool RDNA4Device::applyScanoutFormat() {
+	if (!pipe.valid())
+		return false;
+
+	const uint32_t fmt = scanout10bpc ? 0x0au : 0x08u;
+	const uint32_t hubp = 0x05e5u + hubpOff(), dpp = 0x0ccfu + dppOff();
+	const uint32_t hubpBefore = regReadDmu(2, hubp), dppBefore = regReadDmu(2, dpp);
+	const uint32_t hubpWant = (hubpBefore & ~0x7fu) | fmt, dppWant = (dppBefore & ~0x7fu) | fmt;
+	bool ok = true;
+
+	if (hubpWant != hubpBefore && !regWriteDmu(2, hubp, hubpWant)) {
+		FBLOG("colour: HUBP surface format write failed (0x%08x wanted)", hubpWant);
+		ok = false;
+	}
+	if (dppWant != dppBefore && !regWriteDmu(2, dpp, dppWant)) {
+		FBLOG("colour: DPP surface format write failed (0x%08x wanted)", dppWant);
+		ok = false;
+	}
+	const uint32_t hubpAfter = regReadDmu(2, hubp), dppAfter = regReadDmu(2, dpp);
+
+	FBLOG("colour: plane format %s: HUBP 0x%08x -> 0x%08x, DPP 0x%08x -> 0x%08x (angle %u kept) %s",
+	      scanout10bpc ? "ARGB2101010 (0xa)" : "ARGB8888 (0x8)", hubpBefore, hubpAfter, dppBefore, dppAfter,
+	      (hubpAfter >> 8) & 3, ok ? "ok" : "FAILED");
+	return ok;
+}
+
+void RDNA4Device::setScanoutDepth(uint16_t depth) {
+	const bool deep = depth == 129;   // Ndrv::kDepthMode2
+
+	if (deep == scanout10bpc)
+		return;
+
+	scanout10bpc = deep;
+	FBLOG("colour: the OS switched the framebuffer to depth %u: plane format %s", depth,
+	      deep ? "ARGB2101010" : "ARGB8888");
+	applyScanoutFormat();
 }
 
 // The device debug.rdna4_rot180 acts on.

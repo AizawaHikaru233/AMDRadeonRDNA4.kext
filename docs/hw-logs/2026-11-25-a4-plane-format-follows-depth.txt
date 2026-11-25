@@ -1,0 +1,20 @@
+# 2026-11-25 22:37 the plane follows the depth: ARGB2101010 while csMode 129 is current
+# kext: 0.4.0 baseline + A1/A2/A3 + setScanoutDepth; boot-args include rdna4-rot180=1 rdna4-depth2 armed via trial
+#
+# Key lines (device.cpp applyScanoutFormat):
+#   colour: plane format ARGB2101010 (0xa): HUBP 0x00000008 -> 0x0000000a, DPP 0x00000008 -> 0x0000000a (angle 0 kept) ok
+#   colour: plane format ARGB8888 (0x8): HUBP 0x0000020a -> 0x00000208, DPP 0x0000000a -> 0x00000008 (angle 2 kept) ok
+#   (angle 2 = 180 degrees: rot180 survives the format write, bits [9:8])
+
+AMDRadeonRDNA4: rot180: panel mounted inverted: the scanout is read turned 180 degrees, the cursor with it (rdna4-rot180=1)
+AMDRadeonRDNA4: rot180: HUBP0 scanout 180 deg: 3840x2160 at 15360 bytes a row, the cursor and every flip follow
+AMDRadeonRDNA4: colour: setAttributeForConnection conn 0 colour modes 0x10001001 accepted (Auto|RGB|RGBLimited asked)
+AMDRadeonRDNA4: colour: setAttributeForConnection conn 0 colour depths 0x6 -> kept 0x6 (1=6, 2=8, 4=10 bits a component)
+AMDRadeonRDNA4: depth: control code 10 mode 100 depth 128 answered 1 ret 0x0
+AMDRadeonRDNA4: depth: control code 10 mode 100 depth 128 answered 1 ret 0x0
+AMDRadeonRDNA4: colour: the OS switched the framebuffer to depth 129: plane format ARGB2101010
+AMDRadeonRDNA4: colour: plane format ARGB2101010 (0xa): HUBP 0x00000008 -> 0x0000000a, DPP 0x00000008 -> 0x0000000a (angle 0 kept) ok
+AMDRadeonRDNA4: depth: control code 10 mode 100 depth 129 answered 1 ret 0x0
+AMDRadeonRDNA4: colour: the OS switched the framebuffer to depth 128: plane format ARGB8888
+AMDRadeonRDNA4: colour: plane format ARGB8888 (0x8): HUBP 0x0000020a -> 0x00000208, DPP 0x0000000a -> 0x00000008 (angle 2 kept) ok
+AMDRadeonRDNA4: depth: control code 10 mode 100 depth 128 answered 1 ret 0x0

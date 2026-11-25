@@ -418,6 +418,8 @@ int32_t Translator::switchMode(VDSwitchInfoRec &r) {
 	if (!m || (r.csMode != kDepthMode1 && !deep) || !surface(*m, s))
 		return kBadArgument;
 	currentDepth = deep ? kDepthMode2 : kDepthMode1;
+	if (be.setScanoutDepth)
+		be.setScanoutDepth(be.ctx, currentDepth);
 	if (r.csData != current) {
 		int32_t err = be.switchTo ? be.switchTo(be.ctx, *m, m->id == bootModeId) : kUnsupported;
 		if (err != kSuccess)

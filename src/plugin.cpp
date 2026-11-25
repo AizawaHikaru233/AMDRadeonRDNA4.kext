@@ -290,6 +290,10 @@ int32_t deviceSwitchTo(void *ctx, const Modes::Mode &m, bool) {
 	return static_cast<RDNA4Device *>(ctx)->applyMode(m);
 }
 
+void deviceSetScanoutDepth(void *ctx, uint16_t depth) {
+	static_cast<RDNA4Device *>(ctx)->setScanoutDepth(depth);
+}
+
 void deviceSetPower(void *ctx, bool on) {
 	// a framebuffer macOS has no display on for must not blank the paravirtual display it scans out
 	if (pvHeads && !on)
@@ -1319,7 +1323,8 @@ void attach(FbEntry &e) {
 	computeStage = RDNA4Compute::requestedStage();
 	Ndrv::Backend be { &dev, deviceSurfaceFor, deviceSwitchTo, deviceSetPower,
 	                   deviceSupportsHardwareCursor, deviceSetHardwareCursor,
-	                   deviceDrawHardwareCursor, deviceGetHardwareCursorDrawState };
+	                   deviceDrawHardwareCursor, deviceGetHardwareCursorDrawState,
+	                   deviceSetScanoutDepth };
 #ifdef AMDRadeonRDNA4_VM_TEST
 	if (!dev.isAmd) {
 		pci->setIOEnable(true);
