@@ -15,7 +15,7 @@
 //  have cached it before the first request reached us); every other table
 //  entry gets 100 + its Modes::Mode::id. They stay below 0x80000000, which
 //  Apple reserves for programmable (detailed-timing) modes. There is one
-//  depth, kDepthMode1 = 32 bpp direct.
+//  depth, kDepthMode1 = 32 bpp direct; rdna4-depth2=1 adds kDepthMode2 as a second one (docs/hdr-30bpp-plan.md).
 //
 //  The csc records are mirrored locally (the SDK's IOMacOSVideo.h needs the
 //  kernel headers). IOMacOSVideo.h selects mac68k alignment only for 32-bit
@@ -69,6 +69,7 @@ constexpr int32_t  kDisplayModeIDInvalid      = -1;    // 0xFFFFFFFF
 constexpr int32_t  kDisplayModeIDFindFirst    = -2;    // kDisplayModeIDFindFirstResolution
 constexpr int32_t  kDisplayModeIDNoMore       = -3;    // kDisplayModeIDNoMoreResolutions
 constexpr uint16_t kDepthMode1                = 128;
+constexpr uint16_t kDepthMode2                = 129;   // the second depth rdna4-depth2=1 offers
 constexpr uint32_t kDeclROMtables             = 0x6465636c;   // 'decl'
 constexpr uint32_t kTimingInvalid             = 0;
 constexpr uint32_t kDisplayModeValidFlag      = 0x1;
@@ -279,6 +280,8 @@ public:
 	// says so and there is no DDC block: macOS takes the framebuffer offline
 	// until a connect interrupt makes it ask again.
 	void setConnected(bool on) { connected = on; }
+	// A second depth (30bpp). Off unless a test boot arms it: rdna4-depth2=1.
+	void setDepth2(bool on) { depth2 = on; }
 	size_t  modeCount() const { return count; }
 	// Frames above the head's modes (Modes::buildScaled), listed after them. `scaled` must outlive the Translator; init clears them.
 	void setScaled(const Modes::Mode *scaled, size_t n);
@@ -299,6 +302,8 @@ private:
 	int32_t  current { kBootModeId };
 	uint8_t  syncState { kDPMSSyncOn };
 	bool     connected { true };
+	bool     depth2 { false };
+	uint8_t  currentDepth { kDepthMode1 };
 
 	size_t total() const { return count + __atomic_load_n(&scaledCount, __ATOMIC_ACQUIRE); }
 	const Modes::Mode &at(size_t i) const { return i < count ? modes[i] : scaledModes[i - count]; }
