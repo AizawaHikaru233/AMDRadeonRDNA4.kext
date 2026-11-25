@@ -263,3 +263,103 @@ Next candidates, in order of cost:
    lead to `setAttributeForConnection` — offline, tells us exactly what it wants.
 3. Accept 10 bpc as an "on demand" capability (works when the OS asks: it did switch) and spend the time on DSC,
    which is the other half of the display work and needs no HDR judgement.
+
+# How macOS actually does 10-bit and HDR — three investigations (2026-11-25 23:30)
+
+Three parallel investigations: the NVIDIA reimplementation (`ref/nvidia-macos-driver` @ 87e524a),
+Apple's own binaries in `SystemKernelExtensions.kc`, and Apple's open-source IOGraphics plus public
+reverse-engineering tools. They agree, and they invalidate the assumption behind A3/A4.
+
+## 1. The depth is not the lever — `' bpc'` is *pushed at* the driver
+
+`IOFramebuffer::setDisplayAttributes` (KC 0x14719732; same code in apple-oss IOGraphics
+`IOFramebuffer.cpp:11569-11626`) does, for `' bpc'`:
+
+1. `getAttributeForConnection(0, '\0grd')` — `kConnectionControllerDepthsSupported` (0x00677264). The
+   driver's answer is the supported mask; **if the driver refuses, IOFramebuffer substitutes 0x3 (6|8 bpc)**
+   (`0x14719979`: `shared+0x1a0 == 10 ? 0x7 : 0x3`).
+2. the preferred result starts at **0x2 (8 bpc)** and is then intersected and normalised to the highest bit
+   (`bsr`/`bts` at 0x147199d1),
+3. `setAttributeForConnection(0, ' bpc', mask)` — the resolved depth is **pushed down to the driver**.
+
+So a driver never *answers* `' bpc'`: it is told. Apple's X6000 framebuffer does not implement `' bpc'` at all
+(zero immediates in the AMD stack; only Intel framebuffers and IOFramebuffer itself compare it), answers
+`'colr'` with 0, and never fights the result. NVIDIA does the same: `' bpc'` and `'\0grd'` are hardcoded to
+8 bpc (`nvrm-fb.cpp:5362,5364`) and the colour set is accepted-and-ignored (`:5569-5578`).
+
+`setDisplayAttributes` is called from `IOFramebuffer::extSetProperties` (+0x19b, +0x1db) and
+`matchFramebuffer` — i.e. on **every display reconfiguration**. That is exactly the "reverts to 8 bpc" we
+measured in A3/A4: macOS recomputes the depth each time, and the highest bit it will consider comes from
+`'\0grd'`, not from anything we return for `' bpc'`.
+
+**Conclusion: A3/A4's "answer the colour attributes and program the plane for the second depth" is not how
+macOS does 10-bit.** It works mechanically (we see the switch and the format change) but macOS re-derives the
+depth and returns to 8 bpc. The controller attribute `'\0grd'` is the only depth lever, and NVIDIA's code
+deliberately leaves it at 8 bpc.
+
+## 2. HDR is a *mode* property, not a depth
+
+NVIDIA's HDR is driven by the timing range, not by depth:
+
+```
+nvrm-fb.cpp:4454-4461
+  r.supportedPixelEncoding = kIORangePixelEncodingRGB444;
+  r.supportedBitsPerColorComponent = kIORangeBitsPerColorComponent8;
+  r.supportedColorimetryModes = kIORangeColorimetryNativeRGB | kIORangeColorimetrysRGB;
+  r.supportedDynamicRangeModes = kIORangeDynamicRangeSDR;
+  if (gHdrOn && fHdrCapable) {                       // the sink's CTA-861.3 block says PQ
+      r.supportedColorimetryModes |= kIORangeColorimetryBT2020 | kIORangeColorimetryBT2100;
+      r.supportedDynamicRangeModes |= kIORangeDynamicRangeHDR10;
+  }
+  setProperty(kIOFBTimingRangeKey, OSData::withBytes(&r, sizeof r));
+```
+
+`kIOFBTimingRangeKey` is a **data property on the framebuffer** (`IOGraphicsTypes.h:608`: "will allow the OS to
+program detailed timings that fall within its range"). With it, macOS **generates HDR10 timing variants itself**
+and offers them as modes; the driver only has to:
+
+- treat an HDR10 timing as a **different mode** from the SDR timing of the same raster (`nvrm-fb.cpp:3578,3662`),
+- echo the timing back untouched (`:4511`), including `colorimetry`/`dynamicRange`,
+- program the pipe for `X2B10G10R10` + HDR infoframe (ST2084, static metadata, BT.2100, gamma off) when that
+  mode is chosen (`:3942-3946`, `:2329-2341`).
+
+`'hdrm'` is a **controller attribute** (`setAttribute`, not connection) and strictly a **sink**: the KC has two
+implementations, `AMDRadeonX6000_AmdRadeonFramebuffer::setAttribute` 0xbf876b1 and `AMDFramebuffer::setAttribute`
+0x280ccb, both copy **64 bytes** (`IOFBHDRMetaDataV1` = 12×u16 + 5×u64) into per-display storage and require a
+capability bit (`rec+0x719 & 1`) and a non-zero display count; there is **no getter anywhere**. NVIDIA does the
+same (`:5228-5254`) and refuses when HDR is not already active. Nobody sends it before HDR is on, so its absence
+in our logs was never a defect.
+
+## 3. What CoreDisplay needs, and what is (not) in the kernel
+
+- The HDR toggle is userspace: model whitelist (Apple support 102205 — external HDR10 displays on MacPro7,1 /
+  iMacPro1,1 / iMac20,x etc.), the display's **CTA-861.3 HDR static metadata block** (which CoreDisplay parses;
+  the kernel `struct EDID` is only 128 bytes, `IODisplay.cpp:844-907` fetches the extensions for userspace), and
+  per-mode colour information (CoreDisplay's `ColorModes` elements carry `Depth`, `PixelEncoding`, `EOTF`,
+  `Colorimetry`, `DynamicRange`, `HDRStaticMetadataTypes`, `DisplayLuminance` — AllRez dumps on AMD Macs).
+- The kernel side never advertises HDR capability; the accelerator (`AMDRadeonX6000`) has **no** colour-depth or
+  HDR logic at all (symbol and string scans: only `IOAccelDisplayPipe*` transaction machinery).
+- WhateverGreen has no HDR/30bpp code — there is nothing to copy there. Our earlier "`'hdrm'` is absent from the
+  KC" was a byte-order false negative: the immediate is stored reversed (`'hdrm'` = 0x6864726d appears as
+  `6d 72 64 68`).
+
+## 4. The plan this implies (replaces A3/A4 as the HDR route)
+
+1. **Mode table**: add HDR10 variants of the display modes as *separate* modes (own IDs, `dynamicRange =
+   kIODynamicRangeHDR10`, `colorimetry = BT2020|BT2100`, `bitsPerColorComponent = 10`), gated by an option.
+2. **Timing range**: publish `kIOFBTimingRangeKey` on the framebuffer with those dynamic-range/colorimetry
+   bits, so macOS generates the variants itself if our own mode list is not enough.
+3. **`getTimingInfoForDisplayMode`**: route it (the same Lilu technique as `getPixelInformation`) and fill
+   `IODetailedTimingInformationV2` with the colour fields below — IONDRVFramebuffer is a pure relay
+   (`0x1475dfc4`, NDRV siid 0x12), so without the hook every timing comes back SDR.
+4. **Pipe**: when an HDR10 timing is selected, program ARGB2101010 (the A4 code, already written) plus the HDR
+   infoframe (ST2084, BT.2100, static metadata) — and keep 8 bpc otherwise (no depth fighting).
+5. **`'hdrm'`**: accept the 64-byte metadata as a sink; forward into the infoframe when live. Cheap, late-bound.
+6. **EDID**: serve all blocks (base + CTA + DisplayID) so userspace has the HDR block and the DisplayID timings.
+7. **Measure the OS verdict** before more code: `SLSDisplaySupportsHDRMode` / `CGSIsHDRSupported` (AllRez,
+   `mac-displayctl set-hdr`) tell us "CoreDisplay does not consider this display HDR" vs "it does, scanout is
+   8 bpc". We have no such measurement yet.
+
+Evidence: KC addresses above are link-time == file offsets (`/home/Celia/kc/SystemKernelExtensions.kc`);
+NVIDIA file:line are from `ref/nvidia-macos-driver` @ 87e524a; Apple/IOGraphics line numbers from
+apple-oss-distributions/IOGraphics.
