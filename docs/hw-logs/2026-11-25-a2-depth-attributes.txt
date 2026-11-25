@@ -1,0 +1,338 @@
+# 2026-11-25 20:49 A2: the depth and connection-attribute traffic of one boot with rdna4-depth2=1
+# macOS 26.6.2 (25G83), TCL 32X3B 4K over DisplayPort, kext 0.5.0 + devel/hdr-30bpp
+# hooks: IONDRVFramebuffer::getPixelInformation / set|getAttributeForConnection (observation only)
+#
+# Findings in this file:
+#  - depth 1 is answered with 32 bpp, 3 components x 10 bits, masks 3ff00000/000ffc00/000003ff (ARGB2101010)
+#  - the OS asks for depth 1 (67 times) but keeps depth 0 (3x8) current: no switch to the second depth
+#  - no 'hdrm' (0x6864726d) request in the whole boot
+
+AMDRadeonRDNA4: depth: routed IONDRVFramebuffer::getPixelInformation and the attribute-for-connection pair
+AMDRadeonRDNA4: trial: armed for this boot: armed rdna4-depth2=1 (now marked used)
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x1
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x6c646463 -> 0xe00002c7 value 0x1e53db085
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x1
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x666c6773 -> 0x0 value 0x188
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x68646463 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x61736e73 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x666c6773 -> 0x0 value 0x188
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x6c646463 -> 0xe00002c7 value 0x1e54353af
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x6c646463 -> 0xe00002c7 value 0x1e544df9f
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x6c646463 -> 0xe00002c7 value 0x1e54648ad
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x63656e61 -> 0x0 value 0x0
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7468726d -> 0xe00002c7 value 0xaaaaaaaaaaaaaaaa
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7468726d -> 0xe00002c7 value 0xaaaaaaaaaaaaaaaa
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7468726d -> 0xe00002c7 value 0xaaaaaaaaaaaaaaaa
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7468726d -> 0xe00002c7 value 0xaaaaaaaaaaaaaaaa
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x666c6773 value 0x0 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x636f6c72 value 0x10001001 -> 0xe00002c7
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x00677264 -> 0xe00002c7 value 0xaaaaaaaaaaaaaaaa
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x20627063 value 0x6 -> 0xe00002c7
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x00647064 -> 0xe00002c7 value 0x3
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x00676463 -> 0xe00002c7 value 0x3
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x64666c67 value 0x1 -> 0xe00002c7
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7061726d -> 0x0 value 0x72677363
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x72677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x67677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x62677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x76626c6d -> 0x0 value 0x10000
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x72677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x67677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x62677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x76626c6d value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x666c7573 value 0x1 -> 0x0
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 0 depth 0 ap 0 -> 0xe00002c2: 0 bpp type 0 comp 0×0 mask 00000000 00000000 00000000 0x0 row 0
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7061726d -> 0x0 value 0x72677363
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x72677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x67677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x62677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x76626c6d -> 0x0 value 0x10000
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x72677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x67677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x62677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x76626c6d value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x666c7573 value 0x1 -> 0x0
+AMDRadeonRDNA4: depth: getPixelInformation conn 0 depth 0 ap 0 -> 0xe00002c2: 0 bpp type 0 comp 0×0 mask 00000000 00000000 00000000 0x0 row 0
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7061726d -> 0x0 value 0x72677363
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x72677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x67677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x62677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x76626c6d -> 0x0 value 0x10000
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x72677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x67677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x62677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x76626c6d value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x666c7573 value 0x1 -> 0x0
+AMDRadeonRDNA4: depth: getPixelInformation conn 0 depth 0 ap 0 -> 0xe00002c2: 0 bpp type 0 comp 0×0 mask 00000000 00000000 00000000 0x0 row 0
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x70636e74 -> 0x0 value 0x4
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x7061726d -> 0x0 value 0x72677363
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x72677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x67677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x62677363 -> 0x0 value 0x10000
+AMDRadeonRDNA4: attr: getAttributeForConnection conn 0 attr 0x76626c6d -> 0x0 value 0x10000
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x72677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x67677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x62677363 value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x76626c6d value 0x10000 -> 0x0
+AMDRadeonRDNA4: attr: setAttributeForConnection conn 0 attr 0x666c7573 value 0x1 -> 0x0
+AMDRadeonRDNA4: depth: getPixelInformation conn 0 depth 0 ap 0 -> 0xe00002c2: 0 bpp type 0 comp 0×0 mask 00000000 00000000 00000000 0x0 row 0
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 100 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 3840x2160 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 102 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 103 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 2560x1440 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 104 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 105 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 106 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 107 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1920x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 108 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 109 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1728x1080 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 110 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1680x1050 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 111 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1600x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 112 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1440x900 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 113 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1280x1024 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 114 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1280x720 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 115 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 116 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 1024x768 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 117 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 118 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 800x600 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 119 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 720x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 120 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 0 ap 0 -> 0x0: 32 bpp type 2 comp 3×8 mask 00ff0000 0000ff00 000000ff 640x480 row 15360
+AMDRadeonRDNA4: depth: getPixelInformation conn 121 depth 1 ap 0 -> 0x0: 32 bpp type 2 comp 3×10 mask 3ff00000 000ffc00 000003ff 640x480 row 15360
