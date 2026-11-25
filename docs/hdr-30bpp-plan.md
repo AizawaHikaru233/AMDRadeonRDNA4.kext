@@ -212,3 +212,28 @@ What it means:
    (the old project's `docs/g4-colour.md` has the 10 bpc stream-encoder measurements).
 2. Then re-run with `rdna4-depth2=1` and look at the picture, not only the log: the criterion is a correct desktop
    while `csMode 129` is current.
+
+## What "the picture is unchanged" means (2026-11-25 22:24)
+
+With `csMode 129` switched to and the screen unchanged, the scanout is still reading 8-bit pixels. The register
+dump says why, and where the next change has to go:
+
+| Register | Now | Meaning |
+|---|---|---|
+| `HUBP0_DCSURF_SURFACE_CONFIG` (0x05e5) | `0x00000008` | surface format field = 8 (ARGB8888; bits [9:8] hold the rot180 angle, which is why the value carries 0x8 in the format bits) |
+| `DP0_DP_PIXEL_FORMAT` (0x211f) | `0x00000200` | the DP stream encoder is already 10 bpc (from the firmware) |
+| `DP0_DP_MSA_COLORIMETRY` (0x2120) | `0x40000000` | MISC0 = 0x40 → MSA colour depth 010 = 10 bpc |
+
+So the link already sends 10 bpc and the plane still reads ARGB8888: a 30bpp framebuffer handed to the pipe would
+be read as 8-bit words, i.e. the wrong colours. Nothing changed on screen because the OS switched to 129 and
+back within the same boot, and nothing we programmed depended on the depth.
+
+The next change (gated, so a normal boot cannot be affected):
+
+1. Carry the NDRV depth into the device (`Backend::setScanoutDepth`) when `cscSwitchMode` takes `kDepthMode2`.
+2. With that set, program the plane for ARGB2101010: the DPP's `CNVC_CFG*_CNVC_SURFACE_PIXEL_FORMAT`
+   (0x0ccf / 0x0e3a, Linux writes 0x8 for ARGB8888; ARGB2101010 is 0xa) and the HUBP surface config's format
+   field, keeping the rot180 angle in bits [9:8].
+3. Criterion: with `rdna4-depth2=1` and `csMode 129` current, the desktop is correct on the physical panel — not
+   only a log line. If the colours break, the option is off in the next boot (a trial boot's options do not
+   survive), and the pipe's format write is the place to look.
