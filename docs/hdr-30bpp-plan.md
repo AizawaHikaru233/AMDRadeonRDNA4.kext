@@ -363,3 +363,39 @@ in our logs was never a defect.
 Evidence: KC addresses above are link-time == file offsets (`/home/Celia/kc/SystemKernelExtensions.kc`);
 NVIDIA file:line are from `ref/nvidia-macos-driver` @ 87e524a; Apple/IOGraphics line numbers from
 apple-oss-distributions/IOGraphics.
+
+## A6 (2026-11-25 23:58): the whole EDID is served now
+
+`edidData` is 384 bytes and `readMoreEdidBlocks` appends blocks 2..3 into it instead of a parse-only buffer, so
+`cscGetDDCBlock` hands macOS the same bytes the mode table is built from — base block, CTA-861 (with the HDR
+static-metadata block) and the DisplayID block (the 4K120/144/240 timings). The earlier attempt (2026-11-25
+20:05) was reverted because the **hardware cursor** came out as a green rectangle; the hardware cursor is off
+now (`rdna4-pvcursor=0`), and this boot shows no cursor log and a normal pointer.
+
+Measured after the reboot:
+
+- `ioreg -c AppleDisplay` → `IODisplayEDID` is 769 hex characters = **384 bytes**, extension-count byte (126) =
+  **2**; the driver log has `edid: AUX0: extension block 2 (tag 0x70, checksum ok): 5 DisplayID timing(s)`.
+- Accelerator registered, WindowServer up, Metal bundle in use, no cursor plane.
+- The display node still has no HDR key (`IODisplayPrefsKey` only) — expected: the HDR verdict is CoreDisplay's,
+  and it needs a logged-in session to query (`SLSDisplaySupportsHDRMode` returned "0 online displays" over
+  SSH at the login window, because there is no user session: `/dev/console` is `root`, `who` is empty).
+
+Next measurement, once a user is logged in: ask SkyLight directly.
+
+```python
+# on the Mac, inside the GUI session
+python3 - <<'PY'
+import ctypes
+from ctypes import c_uint32, c_bool, byref
+cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+cg.CGMainDisplayID.restype = c_uint32
+cg.CGGetOnlineDisplayList.argtypes=[c_uint32, ctypes.POINTER(c_uint32), ctypes.POINTER(c_uint32)]
+sl = ctypes.CDLL("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight")
+sl.SLSDisplaySupportsHDRMode.argtypes=[c_uint32]; sl.SLSDisplaySupportsHDRMode.restype=c_bool
+sl.SLSDisplayIsHDRModeEnabled.argtypes=[c_uint32]; sl.SLSDisplayIsHDRModeEnabled.restype=c_bool
+ids=(c_uint32*8)(); n=c_uint32(0); cg.CGGetOnlineDisplayList(8, ids, byref(n))
+for i in range(n.value):
+    d=ids[i]; print(d, bool(sl.SLSDisplaySupportsHDRMode(d)), bool(sl.SLSDisplayIsHDRModeEnabled(d)))
+PY
+```

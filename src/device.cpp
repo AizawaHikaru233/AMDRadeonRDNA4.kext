@@ -665,17 +665,18 @@ bool RDNA4Device::readEDID(uint8_t inst, uint8_t *edid, size_t count,
 	return true;
 }
 
-// The extension blocks past the first (E-DDC segments) into edidMore, in order, logged with their DisplayID timings:
-// the mode table takes them, macOS's EDID stays the base block and the first extension.
+// The extension blocks past the first (E-DDC segments) appended to edidData, in order, logged with their
+// DisplayID timings: macOS is served the same bytes the mode table is built from.
 void RDNA4Device::readMoreEdidBlocks(uint8_t inst, uint8_t blocks) {
-	edidMoreLen = 0;
 	for (uint8_t b = 2; b <= blocks && b <= 3; b++) {
-		uint8_t *block = edidMore + edidMoreLen;
+		if (edidLen + 128 > sizeof(edidData))
+			break;
+		uint8_t *block = edidData + edidLen;
 		if (!readEDID(inst, block, 128, static_cast<uint8_t>((b & 1) * 128), static_cast<uint8_t>(b / 2))) {
 			FBLOG("edid: AUX%u: extension block %u not read (segment %u)", inst, b, b / 2);
 			break;
 		}
-		edidMoreLen += 128;
+		edidLen += 128;
 		Edid::DetailedTiming t[8];
 		const size_t n = Edid::displayIdTimings(block, t, 8);
 		FBLOG("edid: AUX%u: extension block %u (tag 0x%02x, checksum %s): %lu DisplayID timing(s)", inst, b, block[0],
@@ -907,7 +908,7 @@ void RDNA4Device::probeEDID() {
 	if (edidLen == 0 && xp().edidLen != 0) {
 		FBLOG("edid: no EDID on the lit pipe's connector (HPD%u): taking the sink on HPD%u for the boot display",
 		      pipe.hpd, xp().hpd);
-		memcpy(edidData, xp().edid, sizeof(edidData));
+		memcpy(edidData, xp().edid, xp().edidLen);
 		edidLen = xp().edidLen;
 		xp().edidLen = 0;
 		xp().hpd = 0;
@@ -2788,13 +2789,9 @@ void RDNA4Device::buildModeTable() {
 		      bootTiming.pixelClockKHz);
 	}
 
-	// The EDID with its blocks past the first extension (DisplayID timings), for the table alone.
-	static uint8_t full[512];
-	memcpy(full, edidData, sizeof(edidData));
-	memcpy(full + sizeof(edidData), edidMore, sizeof(edidMore));
-	const size_t fullLen = edidLen == sizeof(edidData) ? edidLen + edidMoreLen : edidLen;
+	// The EDID, all of it: the same bytes macOS is served.
 	if (modesetRequested && edidLen)
-		modeCount = Modes::build(full, fullLen, lim, modeTable, Modes::MaxModes);
+		modeCount = Modes::build(edidData, edidLen, lim, modeTable, Modes::MaxModes);
 
 	Edid::BaseInfo base {};
 	if (edidLen && Edid::parseBaseBlock(edidData, edidLen, base)) {

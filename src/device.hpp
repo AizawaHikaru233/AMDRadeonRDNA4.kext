@@ -67,14 +67,12 @@ public:
 	// ARGB8888 (0x8). Kept across mode sets: applyMode re-applies it after applyPanelRotation.
 	bool                scanout10bpc { false };
 
-	// EDID of the boot display's sink: base block plus one CTA extension if
-	// present. 0 length = no DDC sink found.
-	uint8_t edidData[256] {};
+	// EDID of the boot display's sink: the base block and every extension it reports (E-DDC segments), up to
+	// three blocks. The same bytes are served to macOS (cscGetDDCBlock) and are what the mode table is built from:
+	// CoreDisplay parses the CTA-861 blocks in userspace (the kernel only validates the 128-byte base block), so
+	// the HDR static-metadata block has to reach it here.
+	uint8_t edidData[384] {};
 	size_t  edidLen { 0 };
-	// Its blocks 2 and 3 (E-DDC segment 1; DisplayID on a 144 Hz DisplayPort monitor), for the mode table only:
-	// macOS is given the two above.
-	uint8_t edidMore[256] {};
-	size_t  edidMoreLen { 0 };
 	// A display beyond the boot one (rdna4-head2, plugin.cpp): the sink on
 	// another connector, the pipe it is lit on and what the kext lit for it.
 	// The second-pipe functions below act on the selected one (selectExtra).
