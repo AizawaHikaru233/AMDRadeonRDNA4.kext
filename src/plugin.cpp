@@ -196,6 +196,15 @@ bool pvScaledModes { true };   // rdna4-pvscaled=0: no scaled modes above a head
 // rdna4-depth2=1: offer a second depth (30bpp, kDepthMode2) to IONDRVFramebuffer, the A1 experiment of
 // docs/hdr-30bpp-plan.md: it asks whether macOS asks for it at all.
 bool depth2Mode { false };
+// A3 (rdna4-depth2=1): the colour-mode and colour-depth answers for the connection. What macOS set on this machine:
+// 'colr' = Auto|RGBLimited|RGB and ' bpc' = 6|8 (6 and 8 bits a component); both were refused, which is why the
+// display stayed 8 bpc even though the second depth is built (A2). These remember what was accepted.
+uint32_t colourModes { 0 };
+uint32_t colourDepths { 0 };
+// kConnectionColorMode values: the SDK has them only inside `#if 0` (IOGraphicsTypes.h), so the values are spelled here.
+constexpr uint32_t kColourModeRGB        = 0x00000001;
+constexpr uint32_t kColourModeRGBLimited = 0x00001000;
+constexpr uint32_t kColourModeAuto       = 0x10000000;
 // rdna4-pvfast=1: the boot display's paravirtual modes at each size's fastest refresh, not the one nearest 60 Hz. macOS
 // picks a size there, not a refresh (its paravirtual display tells the host the size alone): one refresh a size.
 bool pvFastModes { false };
@@ -1200,6 +1209,19 @@ IOReturn wrapGetPixelInformation(void *fb, int connectIndex, int depth, int aper
 }
 
 IOReturn wrapSetAttributeForConnection(void *fb, int connectIndex, unsigned int attribute, unsigned long value) {
+	// The colour negotiation, while the experiment is armed: take what macOS asks and answer success. 10 bits a
+	// component is added to the depths reported below, so the OS has something to select that the A2 measurement
+	// showed IONDRVFramebuffer can represent.
+	if (depth2Mode && attribute == kConnectionColorModesSupported) {
+		colourModes = static_cast<uint32_t>(value);
+		FBLOG("colour: setAttributeForConnection conn %d colour modes 0x%lx accepted (Auto|RGB|RGBLimited asked)", connectIndex, value);
+		return kIOReturnSuccess;
+	}
+	if (depth2Mode && attribute == kConnectionColorDepthsSupported) {
+		colourDepths = static_cast<uint32_t>(value) | kIODisplayRGBColorComponentBits10;
+		FBLOG("colour: setAttributeForConnection conn %d colour depths 0x%lx -> kept 0x%x (1=6, 2=8, 4=10 bits a component)", connectIndex, value, colourDepths);
+		return kIOReturnSuccess;
+	}
 	auto org = reinterpret_cast<IOReturn (*)(void *, int, unsigned int, unsigned long)>(orgSetAttributeForConnection);
 	const IOReturn r = org(fb, connectIndex, attribute, value);
 	if (depth2Mode || attribute == kIOFBHDRMetaDataAttribute)
@@ -1209,6 +1231,17 @@ IOReturn wrapSetAttributeForConnection(void *fb, int connectIndex, unsigned int 
 }
 
 IOReturn wrapGetAttributeForConnection(void *fb, int connectIndex, unsigned int attribute, unsigned long *value) {
+	if (depth2Mode && value && attribute == kConnectionColorDepthsSupported) {
+		*value = colourDepths | kIODisplayRGBColorComponentBits6 | kIODisplayRGBColorComponentBits8 |
+		         kIODisplayRGBColorComponentBits10;
+		FBLOG("colour: getAttributeForConnection conn %d colour depths -> 0x%lx (6|8|10 bits offered)", connectIndex, *value);
+		return kIOReturnSuccess;
+	}
+	if (depth2Mode && value && attribute == kConnectionColorModesSupported) {
+		*value = colourModes ? colourModes : (kColourModeAuto | kColourModeRGB | kColourModeRGBLimited);
+		FBLOG("colour: getAttributeForConnection conn %d colour modes -> 0x%lx", connectIndex, *value);
+		return kIOReturnSuccess;
+	}
 	auto org = reinterpret_cast<IOReturn (*)(void *, int, unsigned int, unsigned long *)>(orgGetAttributeForConnection);
 	const IOReturn r = org(fb, connectIndex, attribute, value);
 	if (depth2Mode)

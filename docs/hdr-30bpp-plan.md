@@ -178,3 +178,37 @@ display asks for 6 bits a component, or that constant means something else; the 
 2. Only then the pipe: program DCN for 10 bpc (and a 10 bpc DP pixel encoding) so a chosen depth 1 can
    actually be scanned out.
 3. DSC stays the separate, larger track for 4K above 60 Hz (see the DPCD section above).
+
+## A3 result (2026-11-25 22:08, on the card): macOS switches to the second depth
+
+A2 decoded the two attributes macOS pulls before it picks a depth: `kConnectionColorModesSupported` (`'colr'`,
+which it set to `0x10001001` = Auto|RGBLimited|RGB and was **refused**) and `kConnectionColorDepthsSupported`
+(`' bpc'`, set to **0x6 = 8 and 10 bits a component**). A3 answers both while `rdna4-depth2=1` is armed:
+
+```
+colour: setAttributeForConnection conn 0 colour modes 0x10001001 accepted (Auto|RGB|RGBLimited asked)
+colour: setAttributeForConnection conn 0 colour depths 0x6 -> kept 0x6 (1=6, 2=8, 4=10 bits a component)
+depth: control code 10 mode 100 depth 128 answered 1 ret 0x0
+depth: control code 10 mode 100 depth 129 answered 1 ret 0x0     <-- the switch to 30bpp
+```
+
+The OS asked for depth 1 (the ARGB2101010 format IONDRVFramebuffer builds from our NDRV records) 84 times and
+then **switched to it** — the first time anything in this project has seen the second depth selected. Evidence:
+`hw-logs/2026-11-25-a3-colour-depth-switch.txt`.
+
+What it means:
+
+- The 10-bit path is not blocked by IONDRVFramebuffer, NDRV or CoreDisplay. The two connection attributes are the
+  gate, and they are answerable from the plug-in.
+- The scanout is still programmed for 8 bpc, so a frame composited into the 30bpp format has no correct pixels
+  behind it yet: the next step is the DCN pipe's 10 bpc pixel format (ARGB2101010) and the DP stream's 10 bpc
+  encoding, then the same switch again with the picture checked.
+- The OS also switched back to 128 in the same boot (four switches: 128, 128, 129, 128), so whatever makes it keep
+  a depth is not solved yet — worth watching whether it stays on 129 once the scanout matches.
+
+## Next
+
+1. Program the pipe for 10 bpc: the surface format word in the HUBP/DPP and the DP pixel encoding/quantisation
+   (the old project's `docs/g4-colour.md` has the 10 bpc stream-encoder measurements).
+2. Then re-run with `rdna4-depth2=1` and look at the picture, not only the log: the criterion is a correct desktop
+   while `csMode 129` is current.
