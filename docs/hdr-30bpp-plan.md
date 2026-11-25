@@ -203,3 +203,16 @@ So the next experiment is not a guess: handle `'colr'` and `' bpc'` in the plugi
 10-bit colour modes/depths in the encoding IONDRVFramebuffer expects, and watch whether WindowServer then
 takes depth 1 (which A2 showed is already built as ARGB2101010). Only after that does the DCN pipe need
 10 bpc — the OS has to want it first.
+
+## The Metal desktop on 0.5.0-test2: WindowServer asserts in CoreDisplay (2026-11-25)
+
+Installing the official v0.5.0-test2 bundle publishes the accelerator (`accel: registered for WindowServer:
+our Metal bundle`) and then WindowServer aborts — three identical `.ips` reports, `__assert_rtn` in
+`CoreDisplay_CreateDisplayForCGXDisplayDevice`, with CoreDisplay logging `Setting offline display
+0x00000000 main in CGXConstructVirtualFramebuffer` just before. The A/B with the release's own kext aborts
+the same way, so this is not our patch. Evidence: `hw-logs/ws-crash-20261125/`.
+
+What that means for HDR work: the NDRV path (A1, A2) runs **without** the accelerator — every measurement in
+this document was taken with the accelerator unregistered. The 10-bit work does not depend on the Metal
+desktop; it needs CoreDisplay to accept a colour depth on the connection, which is the `'colr'`/`' bpc'`
+step above.

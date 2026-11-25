@@ -1,0 +1,48 @@
+== WindowServer-2026-11-25-210522.ips  WindowServer  2026-11-25 21:05:22.00 +0800
+   exception: EXC_CRASH SIGABRT | termination: Abort trap: 6
+   rdna4/metal images loaded: none
+      #0  libsystem_kernel.dylib   __pthread_kill
+      #1  libsystem_pthread.dylib  pthread_kill
+      #2  libsystem_c.dylib        abort
+      #3  libsystem_c.dylib        __assert_rtn
+      #4  CoreDisplay              CoreDisplay_CreateDisplayForCGXDisplayDevice
+      #5  CoreDisplay              UpdateCGXDisplayDevice
+      #6  CoreDisplay              AddCGXDisplayDeviceToDeviceList
+      #7  CoreDisplay              CGXDisplayDriverInitialize
+      #8  SkyLight                 WS::Displays::CoreDisplayManager::initialize()
+      #9  SkyLight                 WSInitialize
+      #10 SkyLight                 SLXServer
+      #11 WindowServer             
+
+== WindowServer-2026-11-25-210531.ips  WindowServer  2026-11-25 21:05:31.00 +0800
+   exception: EXC_CRASH SIGABRT | termination: Abort trap: 6
+   rdna4/metal images loaded: none
+      #0  libsystem_kernel.dylib   __pthread_kill
+      #1  libsystem_pthread.dylib  pthread_kill
+      #2  libsystem_c.dylib        abort
+      #3  libsystem_c.dylib        __assert_rtn
+      #4  CoreDisplay              CoreDisplay_CreateDisplayForCGXDisplayDevice
+      #5  CoreDisplay              UpdateCGXDisplayDevice
+      #6  CoreDisplay              AddCGXDisplayDeviceToDeviceList
+      #7  CoreDisplay              CGXDisplayDriverInitialize
+      #8  SkyLight                 WS::Displays::CoreDisplayManager::initialize()
+      #9  SkyLight                 WSInitialize
+      #10 SkyLight                 SLXServer
+      #11 WindowServer             
+
+== WindowServer-2026-11-25-210901.ips  WindowServer  2026-11-25 21:09:01.00 +0800
+   exception: EXC_CRASH SIGABRT | termination: Abort trap: 6
+   rdna4/metal images loaded: none
+      #0  libsystem_kernel.dylib   __pthread_kill
+      #1  libsystem_pthread.dylib  pthread_kill
+      #2  libsystem_c.dylib        abort
+      #3  libsystem_c.dylib        __assert_rtn
+      #4  CoreDisplay              CoreDisplay_CreateDisplayForCGXDisplayDevice
+      #5  CoreDisplay              UpdateCGXDisplayDevice
+      #6  CoreDisplay              AddCGXDisplayDeviceToDeviceList
+      #7  CoreDisplay              CGXDisplayDriverInitialize
+      #8  SkyLight                 WS::Displays::CoreDisplayManager::initialize()
+      #9  SkyLight                 WSInitialize
+      #10 SkyLight                 SLXServer
+      #11 WindowServer             
+
