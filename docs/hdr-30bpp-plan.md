@@ -178,3 +178,28 @@ display asks for 6 bits a component, or that constant means something else; the 
 2. Only then the pipe: program DCN for 10 bpc (and a 10 bpc DP pixel encoding) so a chosen depth 1 can
    actually be scanned out.
 3. DSC stays the separate, larger track for 4K above 60 Hz (see the DPCD section above).
+
+## The connection attributes, decoded (2026-11-25 21:05)
+
+The fourccs from the A2 log against `MacKernelSDK/Headers/IOKit/graphics/IOGraphicsTypes.h`:
+
+| Attribute | Constant | What macOS did with it |
+|---|---|---|
+| `' bpc'` (0x20627063) | `kConnectionColorDepthsSupported` (IOGraphicsTypes.h:1075) | **set to 6** — the only value the OS wrote on this connection |
+| `'colr'` (0x636f6c72) | `kConnectionColorModesSupported` (:1074) | **set to 0x10001001 — refused, 0xe00002c7** |
+| `'flgs'` / `'dflg'` | `kConnectionFlags` / `kConnectionDisplayFlags` | 0 / 1 |
+| `'rgsc' 'ggsc' 'bgsc'` | red/green/blue gamma scale | 0x10000 each |
+| `'vblm'` / `'flus'` | VBL multiplier / flush parameters | 0x10000 / 1 |
+| `'cena'` / `'pcnt'` / `'lddc'` / `'hddc'` / `'asns'` | check-enable, param count, DDC sense, Apple sense | 1 / 4 / E00002C7 / 0 / 0 |
+
+**This is the lever.** macOS asks the framebuffer which colour modes and colour depths it supports
+(`kConnectionColorModesSupported`, `kConnectionColorDepthsSupported`) and then tries to select one:
+`'colr' = 0x10001001` was **refused** because nothing in our stack answers those two attributes —
+IONDRVFramebuffer's own implementation does not know them, and our translator only answers csc records.
+`' bpc' = 6` is the depth the OS settled on in the absence of an answer.
+
+So the next experiment is not a guess: handle `'colr'` and `' bpc'` in the plugin's
+`setAttributeForConnection` / `getAttributeForConnection` (the routes are already in place), report the
+10-bit colour modes/depths in the encoding IONDRVFramebuffer expects, and watch whether WindowServer then
+takes depth 1 (which A2 showed is already built as ARGB2101010). Only after that does the DCN pipe need
+10 bpc — the OS has to want it first.
