@@ -190,6 +190,9 @@ uint32_t accelCensus { 0 };     // rdna4-accelcensus=1|2: the E1 impostor-IOAcce
 // that none of our framebuffers has one
 bool pvHeads { false };
 bool pvScaledModes { true };   // rdna4-pvscaled=0: no scaled modes above a head's 3840x2160
+// rdna4-depth2=1: offer a second depth (30bpp, kDepthMode2) to IONDRVFramebuffer, the A1 experiment of
+// docs/hdr-30bpp-plan.md: it asks whether macOS asks for it at all.
+bool depth2Mode { false };
 // rdna4-pvfast=1: the boot display's paravirtual modes at each size's fastest refresh, not the one nearest 60 Hz. macOS
 // picks a size there, not a refresh (its paravirtual display tells the host the size alone): one refresh a size.
 bool pvFastModes { false };
@@ -1263,6 +1266,15 @@ void attach(FbEntry &e) {
 	}
 #endif
 	st->ndrv.init(dev.modeTable, dev.modeCount, dev.defaultModeId, dev.edidData, dev.edidLen, be);
+	{
+		uint32_t depth2 = 0;
+
+		(void)Trial::option("rdna4-depth2", depth2);
+		depth2Mode = depth2 != 0;
+		st->ndrv.setDepth2(depth2Mode);
+		if (depth2Mode)
+			FBLOG("ndrv: rdna4-depth2=1: a second depth (30bpp) offered, kDepthMode2");
+	}
 #ifdef AMDRadeonRDNA4_PVGPU
 	// A test boot's level (rdna4-trial) is only known once NVRAM is; the heads' framebuffers are told before macOS asks.
 	uint32_t pvTrial = 0, pvDisp = 0;
@@ -1387,6 +1399,27 @@ IOReturn wrapDoDriverIO(void *fb, UInt32 commandID, void *contents, UInt32 comma
 	}
 	if (!answered)
 		ret = org(fb, commandID, contents, commandCode, commandKind);
+
+	// The depth experiment (rdna4-depth2=1): what macOS asks about depths. The translator is ours, so this needs
+	// no extra route: every request for a mode's depth and every mode switch goes through here.
+	if (depth2Mode && csc && (code == Ndrv::cscGetVideoParameters || code == Ndrv::cscGetCurMode ||
+	                          code == Ndrv::cscSwitchMode || code == Ndrv::cscGetNextResolution)) {
+		auto *pb = static_cast<NdrvControlParameters *>(contents);
+		unsigned depth = 0, modeId = 0;
+
+		if (pb->params && code == Ndrv::cscGetVideoParameters) {
+			auto *r = static_cast<Ndrv::VDVideoParametersInfoRec *>(pb->params);
+			depth = r->csDepthMode;
+			modeId = static_cast<unsigned>(r->csDisplayModeID);
+		} else if (pb->params && (code == Ndrv::cscSwitchMode || code == Ndrv::cscGetCurMode)) {
+			auto *r = static_cast<Ndrv::VDSwitchInfoRec *>(pb->params);
+			depth = r->csMode;
+			modeId = static_cast<unsigned>(r->csData);
+		}
+		FBLOG("depth: %s code %u mode %u depth %u answered %d ret 0x%x",
+		      isStatus ? "status" : "control", code, modeId, depth, answered ? 1 : 0,
+		      static_cast<unsigned>(ret));
+	}
 	if (commandCode == kIONDRVOpenCommand && ret == kIOReturnSuccess && !e->tried)
 		attach(*e);
 

@@ -258,7 +258,7 @@ int32_t Translator::getCurMode(VDSwitchInfoRec &r) const {
 	if (!m || !surface(*m, s))
 		return kUnsupported;
 	r.csData = current;
-	r.csMode = kDepthMode1;
+	r.csMode = currentDepth;
 	r.csPage = 1;
 	r.csBaseAddr = static_cast<uintptr_t>(1 | s.physBase);   // physical, as IOBootNDRV
 	return kSuccess;
@@ -295,7 +295,7 @@ int32_t Translator::getNextResolution(VDResolutionInfoRec &r) const {
 	r.csHorizontalPixels = m->t.hActive;
 	r.csVerticalLines    = m->t.vActive;
 	r.csRefreshRate      = Modes::refresh1616(m->t);
-	r.csMaxDepthMode     = kDepthMode1;
+	r.csMaxDepthMode     = depth2 ? kDepthMode2 : kDepthMode1;
 	r.csResolutionFlags  = 0;
 	return kSuccess;
 }
@@ -303,7 +303,9 @@ int32_t Translator::getNextResolution(VDResolutionInfoRec &r) const {
 int32_t Translator::getVideoParameters(VDVideoParametersInfoRec &r) const {
 	const Modes::Mode *m = modeFor(r.csDisplayModeID);
 	Surface s {};
-	if (!m || r.csDepthMode != kDepthMode1 || !r.csVPBlockPtr || !surface(*m, s))
+	const bool deep = depth2 && r.csDepthMode == kDepthMode2;
+
+	if (!m || (r.csDepthMode != kDepthMode1 && !deep) || !r.csVPBlockPtr || !surface(*m, s))
 		return kBadArgument;
 	VPBlock &p = *r.csVPBlockPtr;
 	p = VPBlock {};
@@ -313,7 +315,7 @@ int32_t Translator::getVideoParameters(VDVideoParametersInfoRec &r) const {
 	p.vpPixelSize     = 32;
 	p.vpPixelType     = kRGBDirectPixels;
 	p.vpCmpCount      = 3;
-	p.vpCmpSize       = 8;
+	p.vpCmpSize       = deep ? 10 : 8;
 	return kSuccess;
 }
 
@@ -411,8 +413,11 @@ int32_t Translator::getSync(VDSyncInfoRec &r) const {
 int32_t Translator::switchMode(VDSwitchInfoRec &r) {
 	const Modes::Mode *m = modeFor(r.csData);
 	Surface s {};
-	if (!m || r.csMode != kDepthMode1 || !surface(*m, s))
+	const bool deep = depth2 && r.csMode == kDepthMode2;
+
+	if (!m || (r.csMode != kDepthMode1 && !deep) || !surface(*m, s))
 		return kBadArgument;
+	currentDepth = deep ? kDepthMode2 : kDepthMode1;
 	if (r.csData != current) {
 		int32_t err = be.switchTo ? be.switchTo(be.ctx, *m, m->id == bootModeId) : kUnsupported;
 		if (err != kSuccess)
