@@ -196,6 +196,10 @@ bool pvScaledModes { true };   // rdna4-pvscaled=0: no scaled modes above a head
 // rdna4-depth2=1: offer a second depth (30bpp, kDepthMode2) to IONDRVFramebuffer, the A1 experiment of
 // docs/hdr-30bpp-plan.md: it asks whether macOS asks for it at all.
 bool depth2Mode { false };
+// rdna4-depth2=2: report only 10 bits a component (drop 6/8 from ' bpc'), so WindowServer has no 8 bpc choice.
+// The OS's own HDR judgement never happens on this machine (no 'hdrm' is requested), so this is the way to ask
+// whether a 10-bit desktop can be held at all.
+bool depth10Only { false };
 // A3 (rdna4-depth2=1): the colour-mode and colour-depth answers for the connection. What macOS set on this machine:
 // 'colr' = Auto|RGBLimited|RGB and ' bpc' = 6|8 (6 and 8 bits a component); both were refused, which is why the
 // display stayed 8 bpc even though the second depth is built (A2). These remember what was accepted.
@@ -1236,8 +1240,10 @@ IOReturn wrapSetAttributeForConnection(void *fb, int connectIndex, unsigned int 
 
 IOReturn wrapGetAttributeForConnection(void *fb, int connectIndex, unsigned int attribute, unsigned long *value) {
 	if (depth2Mode && value && attribute == kConnectionColorDepthsSupported) {
-		*value = colourDepths | kIODisplayRGBColorComponentBits6 | kIODisplayRGBColorComponentBits8 |
-		         kIODisplayRGBColorComponentBits10;
+		*value = depth10Only ? static_cast<unsigned long>(kIODisplayRGBColorComponentBits10)
+		                     : static_cast<unsigned long>(colourDepths | kIODisplayRGBColorComponentBits6 |
+		                                                  kIODisplayRGBColorComponentBits8 |
+		                                                  kIODisplayRGBColorComponentBits10);
 		FBLOG("colour: getAttributeForConnection conn %d colour depths -> 0x%lx (6|8|10 bits offered)", connectIndex, *value);
 		return kIOReturnSuccess;
 	}
@@ -1344,6 +1350,7 @@ void attach(FbEntry &e) {
 
 		(void)Trial::option("rdna4-depth2", depth2);
 		depth2Mode = depth2 != 0;
+		depth10Only = depth2 >= 2;
 		st->ndrv.setDepth2(depth2Mode);
 		if (depth2Mode)
 			FBLOG("ndrv: rdna4-depth2=1: a second depth (30bpp) offered, kDepthMode2");

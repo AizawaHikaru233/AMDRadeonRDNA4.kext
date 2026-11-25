@@ -237,3 +237,29 @@ The next change (gated, so a normal boot cannot be affected):
 3. Criterion: with `rdna4-depth2=1` and `csMode 129` current, the desktop is correct on the physical panel — not
    only a log line. If the colours break, the option is off in the next boot (a trial boot's options do not
    survive), and the pipe's format write is the place to look.
+
+## A5 (2026-11-25 23:20): ' bpc' is only ever *set* — the get path is never used
+
+`rdna4-depth2=2` reported only 10 bits a component from `getAttributeForConnection(' bpc')`. No effect: the OS
+never *gets* that attribute on this connection — the log shows only the set (`colour depths 0x6 -> kept 0x6`) — so
+there is nothing to nudge from the get side. What follows the 129 switch, every boot, is the same: the OS
+enumerates all six depths, reads the two pixel formats (3×8 and 3×10), destroys the extra framebuffer resources
+(WindowServer's display reconfiguration) and then switches back to 128 by its own policy — not because anything
+we return is wrong.
+
+So the remaining question is outside the kernel: how CoreDisplay decides a display may be driven at 10 bpc/HDR.
+The System kernel collection has **no `'hdrm'` constant at all** (the one match in
+`/home/Celia/kc/SystemKernelExtensions.kc` is inside the debug string "msghdrmsg"), i.e. no in-kernel driver of
+this build implements `kIOFBHDRMetaDataAttribute`. The judgement therefore lives in the userspace CoreDisplay /
+SkyLight (dyld shared cache), and the way to it is the display's own HDR declaration (EDID/IODisplay), not a
+framebuffer attribute.
+
+Next candidates, in order of cost:
+
+1. Serve the **whole EDID** (third block, DisplayID) — the hardware cursor that broke last time is now off
+   (`rdna4-pvcursor=0`), so the risk is low; if CoreDisplay reads the display's capabilities from the EDID it is
+   given, this is the cheapest thing that could change its mind.
+2. Search CoreDisplay's binary (dyld shared cache on the Mac) for `'hdrm'`/HDR strings and the call sites that
+   lead to `setAttributeForConnection` — offline, tells us exactly what it wants.
+3. Accept 10 bpc as an "on demand" capability (works when the OS asks: it did switch) and spend the time on DSC,
+   which is the other half of the display work and needs no HDR judgement.
