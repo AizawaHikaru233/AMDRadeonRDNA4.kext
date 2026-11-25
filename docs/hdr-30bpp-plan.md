@@ -399,3 +399,24 @@ for i in range(n.value):
     d=ids[i]; print(d, bool(sl.SLSDisplaySupportsHDRMode(d)), bool(sl.SLSDisplayIsHDRModeEnabled(d)))
 PY
 ```
+
+## The IOFBTimingRange attempt, and why it is withdrawn (2026-11-26 00:30)
+
+Publishing an `IODisplayTimingRangeV2` under `kIOFBTimingRangeKey` on the framebuffer (the NVIDIA
+mechanism, doc §2) **panics this machine**: three identical `type = 14=page fault` panics with
+`CR2 = 0x17d7840` = 25,000,000 = the `minPixelClock` we put in the structure — the kernel used a clock
+value from our blob as an address. Recovery and the panic reports: `hw-logs/panics-20261126/`.
+
+So the mechanism is right in principle (NVIDIA does it, and it is how macOS learns it may program HDR10
+timings) but **the exact structure/layout this build expects is not the V2 blob we built**. Before a
+second attempt:
+
+- the property has to be produced by whatever `IONDRVFramebuffer`/`IOFramebuffer` itself would publish, or
+- the structure version must be taken from what this build's `IOFramebuffer::getTimingRange` reads
+  (disassembly), and
+- the attempt has to be made **without the risk of a boot loop**: e.g. only when a test boot's option is
+  armed *and* with a fallback that can be undone without physical access (the kext disabled by the user
+  was what made recovery possible).
+
+Until then the HDR route stops at A6 (full EDID) + A7 (the OS verdict: `supportsHDR=False` at
+2026-11-26 00:03, measured in a logged-in session).
