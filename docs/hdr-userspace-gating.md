@@ -746,3 +746,194 @@ corrected: the tables are needed, but they must be published **on the accelerato
 `IOAccelDisplayPipe`**, not on the NDRV/framebuffer gamma path. §3.2 items 5–6 (modern timing range,
 per-mode colour fields) are unaffected — they are the *other* gate. Everything else in §1–§5 stands; the
 "gamma" hypothesis was right about the *missing input* and wrong about the *wire*.
+
+---
+
+# §9 (follow-up, 2026-11-26 09:10–09:35): who fills `plane[0]+0x88` — the userspace answer
+
+Measurement that forced this: the accelerator now attaches `IOAccelDisplayPipeGammaTable2` (1024×10) and
+`IOAccelDisplayPipePreCSCLinearizationVID` to every pipe's plane 0 via
+`set_current_plane_gamma_table` / `set_current_pipe_precsclinearization_vid` — and the gate does not
+move (`plane with no gamma` 38, `hdr-policy` 0, numerically identical to a boot without them). That is
+consistent with everything below: **the kernel objects are not the input.**
+
+**Correction to §8.2** (it was wrong about one wire): the two stubs `LoadCapabilities` calls are *not*
+IOAccelerator.framework. `dyld_info -lookup_va` on CoreDisplay resolves them:
+
+```
+0x7FF80544DCA2  _IOPresentmentCopyCapabilities                       (called first)
+0x7FF80544DC9C  _IOPresentmentCapabilitiesStructureFromDictionary    (called with its result)
+```
+
+so the whole capability path is **`/System/Library/PrivateFrameworks/IOPresentment.framework/Versions/A/IOPresentment`**
+(image base `0x7FF81598D000`, `__text` 95 856 B, 553 functions, 1027 local symbols). The IOAccelerator
+`dlsym` list in §8.2 is real but belongs to the *transaction/programming* path, not to capabilities.
+
+## 9.1 The count is `CFArrayGetCount(plane["GammaArray"])` — proven
+
+`IOPresentment::__planesFromDictionary(CFDictionary*, sDeviceEntryDictionary*)`
+= IOPresentment **+0x7DF0** (0x7FF815994DF0):
+
+```
+0x…4E18   CFDictionaryGetValueIfPresent(dict, CFSTR("PlaneArray"), &v)      ; key @0x7FF84193B300 = "PlaneArray"
+0x…4E22   count = CFArrayGetCount(v)                                        ; ≤0 → return 0x2003
+0x…4E4A   imul r15, rax, 0xA8                     ← ★ the 0xA8 plane stride
+0x…4E5E   out->p90 = calloc(count*0xA8)                                     ; the plane array
+0x…4E7A   memset(out->p90, 0, count*0xA8)
+0x…4E83   out->p88 = count                                                  ; plane count
+0x…4EBF   per plane i:                                    ; ix = v[i]
+0x…4EC2   CFDictionaryGetValueIfPresent(planeDict, CFStr("Flags"), …)       ; key @0x7FF84193ABE0 = "Flags"
+0x…4F..   … __gammaFromDictionary(planeDict, &plane->gammaSegments, &plane->gammaCount)
+          … __linearizationFromDictionary(…), __cursorFromDictionary(…), __scalerFromDictionary(…)
+```
+
+`IOPresentment::__gammaFromDictionary(CFDictionary*, sGammaSegmentDictionary**, uint64*)`
+= IOPresentment **+0x7B90**:
+
+```
+0x…4BB2   CFDictionaryGetValueIfPresent(planeDict, CFStr("GammaArray"), &v)  ; key @0x7FF84193B460
+0x…4BC9   n = CFArrayGetCount(v)          ; ≤0 → return, leaving the pair untouched (count stays 0)
+0x…4BDE   imul r14, n, 0x38               ← ★ 0x38 per segment — the stride CoreDisplay later walks
+0x…4BEF   *segments = calloc(n*0x38)
+0x…4C0B   *outCount = n
+0x…4C5F   per segment: __fieldsFromDictionary(seg, &Type, &min, &max, &a, &b, &c, &MaximumSize, …)
+```
+
+So: **`plane[0]+0x88` = the number of elements in the CFArray stored under `GammaArray` in the first
+element of `PlaneArray`.** Not a pointer, not a table, not a user-client return value — an array count.
+The dictionary schema (all key strings from IOPresentment `__cstring`, read by the `__*FromDictionary`
+family) is Apple's `sPipelineDictionary`:
+
+```
+PipelineDictionaryVersion, DeviceArray
+  DeviceArray[i] = { EntryDictionary, EndPointDictionary{LooksLikeWidth/Height, PixelClock…,
+                     LinkCurrentMaximumBPC, InlineBufferDictionary, …}, QueueDictionary,
+                     RotationDictionary, PipelineScalerDictionary, CursorArray, PlaneArray }
+  PlaneArray[j]  = { Flags, PixelFormats, BlendType, PlaneScalerDictionary,
+                     LinearizationArray[{SegmentDictionary{Type,ConfigurationID,MinimumValue,
+                                                          MaximumValue,MaximumSize,FixedFormat}}],
+                     GammaArray      [{SegmentDictionary{Type,MinimumValue,MaximumValue,
+                                                        MaximumSize,FixedFormat}}],
+                     CSCArray, ClosedCaptionRegions }
+```
+
+`LinearizationArray` is the exact analogue for `IOPCapabilities::LinearizationChannelTableEntryCountAndType`
+(i.e. `SupportsLinearization`), and `SegmentDictionary.Type/FixedFormat` are what
+`GammaChannelTableEntryCountAndType()` turns into {16,12,10,8}-bit entry types.
+
+## 9.2 Who builds that dictionary, and from where — the AGDC attributes
+
+`IOPPresentmentCopyCapabilities(ref)` = IOPresentment +0xAB8: validates the ref, then tail-calls
+`[ref->pA0]->vtable[0]()`. `IOPresentment::IOPresentmentCopyCapabilities()` (+0x55E6) is literally
+
+```
+7ff8159925e6  xor eax,eax ; ret          ; the base class returns NULL
+```
+
+so the dictionary comes from a subclass. The builder class is `IOPresentmentCapabilities`
+(and `IOPresentmentCapabilitiesDisplayPipe` for the accel-pipe flavour), whose method list *is* the
+dictionary builder and, more importantly, its **inputs**:
+
+```
+IOPresentmentCapabilities::IOPresentmentCreatePipelineDictionary()      +0x…A72E
+  …CreateDeviceArray / CreatePlaneArray / CreatePlaneDictionary / CreateGammaArray +0x…BBFE /
+  CreateGammaDictionary / CreateLinearizationArray / CreateLinearizationDictionary /
+  CreateCSCArray / CreateCursorArray / CreateScalerArray / CreateEndPointDictionary / CreateQueueDictionary
+IOPresentmentCapabilities::__gatherCapabilities()                       +0x…
+IOPresentmentCapabilities::__GatherIOFBCapabilities()                   +0x…DDA2
+IOPresentmentCapabilities::__GatherAGDCLinkCapabilities(AGDCStreamAddress_t)   +0x…DDAE
+IOPresentmentCapabilities::__GatherAGDCLogicalDeviceCapabilities()      +0x…CAD2
+IOPresentmentCapabilities::__GatherAGDCDisplayPipelineCapabilities()    +0x…CC94
+IOPresentmentCapabilities::__getDisplayInformation()
+   + the value converters that prove where each number comes from:
+   AGDCGammaTypeToIOPresentment(AGDCGammaType_t), AGDCGammaFixedFormatToIOPresentment(AGDCGammaFixedFormat_t),
+   AGDCLinearizationTypeToIOPresentment(AGDCLinearizationType_t), AGDCCSCTypeToIOPresentment,
+   AGDCFlagsToIOPresentment(AGDCExtendedCapabilityFlags_t), AGDCPixelFormatTypeToIOPresentment, …
+```
+
+Both AGDC gatherers I disassembled do the same thing — a **user-client struct call to the AGDC
+connection** (the string vocabulary in this image is `AGDC`, `ioPresentmentFindAGDCMatch`,
+`ioPresentmentOpenServiceForID`, `ioPresentmentGenerateDeviceMap`, `kAGDCGPUCapability %#llx %zu %u`):
+
+```
+__GatherAGDCDisplayPipelineCapabilities:                       (…CC94)
+   r12 = this->p20            ; the AGDC connection object (NULL → return 0x808)
+   if (!r12->p10)             → return 0x808
+   memset(this+0x69F0, 0, 0x196C)
+   *(u32*)(this+0x69F0) = r12->p50                 ; framebuffer index
+   *(u64*)(this+0x69F4) = 0x0000000040'00000010     ; sub-query id
+   *(u32*)(this+0x69F8) small                      ; (checked against 9 afterwards)
+   IOConnectCallStructMethod(r12->p20 /*connect*/, 0x711, this+0x69F0, 0x196C, this+0x69F0, &size)
+__GatherAGDCLogicalDeviceCapabilities:                          (…CAD2)
+   same pattern, answer buffer at this+0x14EBC, same selector 0x711, same 0x196C
+```
+
+**`0x711` is the AGDC attribute our own kext already answers**:
+`RDNA4DeviceControl::vendor_doDeviceAttribute(unsigned attribute, …)` in `src/rdna4accel.cpp`
+(`attribute == 0x711` → `framebufferQuery(in, o)`, cases 1/2/4/8/0x10/0x20/0x80/0x100/0x200/0x400/
+0x800/0x1000/0x2000/0x4000/0x8000, `default → kIOReturnUnsupported`), plus attribute `1` (vendor info)
+and attribute `0x921` (`AGDCGPUCapability_t`, 0xb0 B, hand-built paravirtual values with everything
+else zero). That is the whole answer to "what does ours do today": the gamma/linearization fields in
+those two answers are **zero** (0x921) or **refused/zeroed** (0x711 sub-queries), which produces an
+empty `GammaArray` and therefore `plane[0]+0x88 == 0`.
+
+## 9.3 The three questions, answered
+
+**(1) Is `+0x88` filled by a constructor that runs when WindowServer creates the plane?** Yes, in this
+sense: CoreDisplay's `DisplayPipe` constructor (`CoreDisplay+0xD470`) → `LoadCapabilities`
+(`CoreDisplay+0x10CC9`) → `IOPresentmentCopyCapabilities` + `IOPresentmentCapabilitiesStructureFromDictionary`
+(the latter is `IOPresentment::…EPKvP19sPipelineDictionary`, i.e. it fills CoreDisplay's
+`sPipelineDictionary`) → `__planesFromDictionary` / `__gammaFromDictionary` above. The *contents* are
+not a registry property and not an `IOAccelDisplayPipeUserClient2` selector: they are the dictionary
+`IOPresentmentCapabilities` builds from the **AGDC** capability attributes present when WindowServer
+creates the pipe.
+
+**(2) If it is a selector, does the driver have to answer it?** Yes — but it is the **AGDC** selector
+**0x711** (`IOConnectCallStructMethod`, 0x196C-byte answer) on the
+`AppleGraphicsDeviceControlClient` connection, i.e. `AppleGraphicsDeviceControl::vendor_doDeviceAttribute`
+in our kext — *not* `IOAccelDisplayPipeUserClient2` selectors 5/10
+(`transactionSetPlaneGammaTable` / `transactionSetPipePreCSCLinearizationVID`). Those are the
+**programming** path: they push a table into an already-existing capability; nothing calls them while
+the capabilities are being read, and the family's default `kIOReturnUnsupported` for them is therefore
+invisible today. What our side returns now: attribute 0x711 is answered for the sub-queries listed above
+and `kIOReturnUnsupported` otherwise; 0x921 is answered with a mostly-zero `AGDCGPUCapability_t`.
+
+**(3) Is it the `IODisplay` gamma table pushed after the pipe exists (chicken-and-egg)?** **No.**
+`__GatherIOFBCapabilities()` is the framebuffer-side gatherer (endpoint size/timings/queue/rotation from
+IOFramebuffer properties); the gamma and linearization segments come from the AGDC-typed data
+(`AGDCGammaType_t` / `AGDCLinearizationType_t` converters in the same class). The 19 078
+`using last created GPU Gamma2 Table` lines and `logGammaTransferInfoForDevice … 0.501961` are the CGX
+colour-management path (§8.3), which is fed by IOFramebuffer/IODisplay — a different consumer of the
+same table, and not an input to this dictionary.
+
+## 9.4 Smallest change, and what is still hypothesis
+
+Smallest change is in the AGDC answers, not in the accel pipe objects:
+
+1. `attribute == 0x921` (`AGDCGPUCapability_t`, 0xb0 B): set the gamma/linearization capability fields
+   instead of leaving them zero. **[hyp]** on which offsets — they are among the zeros we write;
+   Apple's paravirtual answer only fills 0x08/0x1c/0x44/0x50/0x84, and the gamma-related ones are not
+   in that set.
+2. `attribute == 0x711`, `framebufferQuery`: add the per-plane capability records for the sub-queries we
+   currently answer with zeros (`case 4` = 0x30 B zeroed, `case 8` = 0x32C B zeroed, `case 0x100`,
+   `0x1000`, `0x8000`) and stop returning `kIOReturnUnsupported` for sub-queries CoreDisplay actually
+   issues. **[hyp]** on which sub-query carries `PlaneArray`/`GammaArray` — see the experiment below.
+3. Nothing to add on `IOAccelDisplayPipeUserClient2` selectors 5/10 for this gate; keep the attached
+   kernel objects (they are needed later, when a gain must actually be programmed), and keep the NDRV
+   gamma path (it feeds `PerformPlaneGammaTransaction`/CLUT, not the verdict).
+
+**Experiment that names the field in one boot (no guessing):** raise the existing log in
+`vendor_doDeviceAttribute` (it already logs 32 hits: `AGDC attribute 0x%x (in %lu, out %lu)`) to log
+every call plus `in[0]`/`in[1]`, and correlate the order with `plane with no gamma`. The call that
+precedes the first `GammaChannelTableEntryCountAndType` failure is the one whose answer must carry the
+plane records. Success criteria are unchanged from §8.6: `plane with no gamma` → 0, then the
+`hdr-policy = 0x0` line appearing (proof that `word[IOPCapabilities+0xEA]` went non-zero), then the
+in-session probe.
+
+**Confidence.** Container and count (`plane+0x88` = `GammaArray` count, stride 0x38) — **proven by
+disassembly**. Builder (IOPresentment, from AGDC-typed gathered data; transport = AGDC attribute 0x711,
+0x196C-byte answer) — **proven by disassembly**. That our current AGDC answers make it empty —
+**inferred** (our source is read-only here; the zeroed/refused sub-queries are visible, the exact
+carrier field is not). That an `IOAccelDisplayPipe`-side object would ever be enough — **refuted** by
+the measurement that motivated this section, and by the fact that none of the 14 IOAccelerator
+entry points appears anywhere in the capability path.
