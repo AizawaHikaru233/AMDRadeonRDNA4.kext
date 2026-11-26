@@ -360,6 +360,9 @@ constexpr size_t kPipePlaneState = 0x240, kPipePlaneStride = 0x70, kPipePlaneGam
 // The option's value, read once in accelTo (before any pipe exists: the pipes are made by the display machine's start, step 3), so
 // that a pipe's init does no NVRAM work. 0 (the default, and every boot that does not arm it): nothing is made, nothing logged.
 uint32_t gAccelGammaKind;
+// (rdna4-agdccaps, docs/hdr-agdc-caps.md) What the AGDC 0x711 answer says about a plane's gamma and linearization. Read once in
+// accelTo for the same reason, and 0 on every boot that does not arm it: the answers are then byte-for-byte the ones they were.
+uint32_t gAgdcCapsKind;
 
 class RDNA4DisplayPipe : public IOAccelDisplayPipe {
 	OSDeclareDefaultStructors(RDNA4DisplayPipe)
@@ -617,10 +620,65 @@ uint32_t accelFlags();   // (diagnostic) our accelerator's flags (+0xc78), 0 wit
 class RDNA4DeviceControl : public AppleGraphicsDeviceControl {
 	OSDeclareDefaultStructors(RDNA4DeviceControl)
 
+	// (rdna4-agdccaps, docs/hdr-agdc-caps.md §1) The shape of an AGDC 0x711 per-plane capability answer, read off the consumer
+	// (IOPresentment's __GatherAGDCDisplayPipelineCapabilities, 0x7FF81599CC94): the 0xc-byte header {u32 framebuffer; u32
+	// query; u32 count} then `count` records of 0x32c bytes, and IOPresentment keeps a record for a plane only if bit (its pipe)
+	// is set in the u64 at record+0x04 — which is the field our answers left zero, so GammaArray stayed empty. The record's fields
+	// end at +0x28 (MinimumValue +0x20, MaximumValue +0x24, MaximumSize +0x28: the table's entry count).
+	static constexpr uint32_t kCapabilityRecord = 0x32c;        // stride; 0xc + 8 * 0x32c = 0x196c, the size IOPresentment sends
+	static constexpr uint32_t kCapabilityFields = 0x30;         // the bytes of a record we write (+0x00 … +0x2f)
+	static constexpr uint64_t kCapabilityPlaneMask = 0xff;      // bits 0..7: every pipe index IOPresentment can test (see the doc)
+	static constexpr uint64_t kGammaEntries = 1024;             // 1024 x 10-bit identity gamma: what this panel's pipe takes
+	static_assert(0xc + 8 * kCapabilityRecord == 0x196c, "IOPresentment's 0x711 answer is its 0xc-byte header and eight records");
+	static_assert(kCapabilityFields <= kCapabilityRecord, "the fields we write fit inside one record");
+	// Apple's own values for the record's other fields, so nothing here is invented: query 2 (gamma) is
+	// AppleParavirtFramebuffer's (Flags 5, Type 8 — the AGDC dialect our attribute-1 answer advertises) and query 4
+	// (linearization) is AppleParavirtFramebuffer's zeroes with AMDRadeonX6000's getFbCapabilityForDegamma Type 1 and
+	// AppleIntelCFLGraphicsFramebuffer's MaximumSize 0x400. =2 is AMDRadeonX6000's own numbers instead (Flags 0x88005 /
+	// 0x80005, Type 0x10, linearization MaximumSize 1), so one boot can compare the two dialects.
+	struct CapabilityStyle {
+		uint32_t gammaFlags, gammaType, linFlags, linType;
+		uint64_t gammaMaxSize, linMaxSize;
+	};
+	static CapabilityStyle capabilityStyle(uint32_t kind)
+	{
+		if (kind >= 2)
+			return { 0x88005, 0x10, 0x80005, 1, kGammaEntries, 1 };
+		return { 5, 8, 5, 1, kGammaEntries, kGammaEntries };
+	}
+
+	// Fills one record of a 0x711 answer for query 2 (gamma) or 4 (linearization): what this panel+pipe can actually do, in
+	// the fields IOPresentment reads. False — with nothing written — unless the answer is long enough for the whole record:
+	// every write below is bounded by the caller's stated length, and this is the only place in the class that touches it.
+	bool capabilityRecord(uint8_t *o, unsigned long size, uint32_t query, uint32_t kind)
+	{
+		if (!o || (query != 2 && query != 4))
+			return false;
+		if (size < 0xc + kCapabilityFields)   // the header plus the longest record field we write
+			return false;
+		const CapabilityStyle style = capabilityStyle(kind);
+		const bool gamma = query == 2;
+		uint8_t *r = o + 0xc;
+		bzero(r, kCapabilityFields);
+		auto u32 = [r](uint32_t at, uint32_t v) { *reinterpret_cast<uint32_t *>(r + at) = v; };
+		auto u64 = [r](uint32_t at, uint64_t v) { *reinterpret_cast<uint64_t *>(r + at) = v; };
+		*reinterpret_cast<uint32_t *>(o + 0x08) = 1;   // the answer's count: one record (the caller offered 8)
+		u32(0x00, gamma ? style.gammaFlags : style.linFlags);
+		u64(0x04, kCapabilityPlaneMask);               // ★ the field that was zero: bit p = "this segment is plane p's"
+		u32(0x0c, 0);                                  // NonAtomicApplicationPeriod = 0.0f
+		u32(0x10, gamma ? style.gammaType : style.linType);
+		u32(0x14, 0);                                  // FixedFormat
+		u32(0x18, 0);                                  // ConfigurationID
+		u32(0x20, 0);                                  // MinimumValue = 0.0f
+		u32(0x24, 0x3f800000u);                        // MaximumValue = 1.0f
+		u64(0x28, gamma ? style.gammaMaxSize : style.linMaxSize);   // MaximumSize: the table's entry count
+		return true;
+	}
+
 	// Attribute 0x711, 0x196c bytes {u32 framebuffer (0-based, its place in 0x980's list), u32 query, answer from +8}: what CoreDisplay
 	// makes its display's devices of (without it: "capabilities with no devices" and an assert). As the paravirtual framebuffer answers
 	// (AppleParavirtFramebuffer::doDeviceAttribute): 1, 2, 4, 8 (cases of a table), 0x10 the mode (width, height), the rest flags.
-	IOReturn framebufferQuery(const uint32_t *in, uint8_t *o)
+	IOReturn framebufferQuery(const uint32_t *in, uint8_t *o, unsigned long size)
 	{
 		auto u32 = [o](uint32_t at, uint32_t v) { *reinterpret_cast<uint32_t *>(o + at) = v; };
 		auto u64 = [o](uint32_t at, uint64_t v) { *reinterpret_cast<uint64_t *>(o + at) = v; };
@@ -649,13 +707,25 @@ class RDNA4DeviceControl : public AppleGraphicsDeviceControl {
 			u32(8, 1), u32(0xc, 5), u64(0x10, 0), u32(0x18, 0), u32(0x1c, 8), u32(0x20, 0), u64(0x24, 0), u32(0x2c, 0x30300);
 			u32(0x30, 0xbf800000u), u32(0x34, 0x3f800000u);   // -1.0, 1.0
 			return kIOReturnSuccess;
-		case 2:
-			u32(8, 1), u32(0xc, 5), u64(0x10, 0), u32(0x18, 0), u32(0x1c, 0x80), u32(0x20, 0), u64(0x24, 0), u32(0x2c, 0);
-			u32(0x30, 0x3f800000u), u64(0x34, 0);   // 1.0
+		// (rdna4-agdccaps) The two per-plane capability records IOPresentment builds GammaArray and LinearizationArray from:
+		// answered with what this panel+pipe can do (a plane mask, a Type, and the table's entry count) instead of the
+		// zeroed records that made both arrays empty. Unarmed (kind 0): the paravirtual framebuffer's answer, unchanged.
+		// A caller whose answer is too short for a record gets kIOReturnUnsupported rather than a half-written one.
+		case 2: case 4: {
+			const uint32_t caps = __atomic_load_n(&gAgdcCapsKind, __ATOMIC_RELAXED);
+			if (caps) {
+				if (!capabilityRecord(o, size, in[1], caps))
+					return kIOReturnUnsupported;
+				return kIOReturnSuccess;
+			}
+			if (in[1] == 2) {
+				u32(8, 1), u32(0xc, 5), u64(0x10, 0), u32(0x18, 0), u32(0x1c, 0x80), u32(0x20, 0), u64(0x24, 0), u32(0x2c, 0);
+				u32(0x30, 0x3f800000u), u64(0x34, 0);   // 1.0
+			} else {
+				u32(8, 1), bzero(o + 0xc, 0x30);
+			}
 			return kIOReturnSuccess;
-		case 4:
-			u32(8, 1), bzero(o + 0xc, 0x30);
-			return kIOReturnSuccess;
+		}
 		case 8:
 			u32(8, 1), bzero(o + 0xc, 0x32c);
 			return kIOReturnSuccess;
@@ -753,7 +823,7 @@ public:
 			}
 			r = kIOReturnSuccess;
 		} else if (attribute == 0x711 && inLength == 0x196c && size == 0x196c && o && in) {   // a framebuffer's query (below)
-			r = framebufferQuery(reinterpret_cast<const uint32_t *>(in), o);
+			r = framebufferQuery(reinterpret_cast<const uint32_t *>(in), o, size);
 		} else if (attribute == 0x925 && inLength == 0xc && size >= 0xc && o && in) {   // whether framebuffer n (1-based) shows: yes
 			*reinterpret_cast<uint32_t *>(o + 8) = 1;   // (the paravirtual framebuffer's flag at +0x1e0, bit 0)
 			r = kIOReturnSuccess;
@@ -765,6 +835,25 @@ public:
 			*reinterpret_cast<uint64_t *>(o + 0x50) = 0x40000000000ull;
 			*reinterpret_cast<uint64_t *>(o + 0x84) = 1;
 			r = kIOReturnSuccess;
+		}
+		// (docs/hdr-agdc-caps.md §6) The line that names the carrier: with rdna4-agdccaps armed, every 0x711/0x921 call is
+		// logged with its first four input words (0x711's are {framebuffer, query, offered entries}) and the first four of the
+		// answer, so the call that precedes the first "plane with no gamma" can be told from the others. Unarmed: the line
+		// this was before it, throttled the same way, so a default boot logs what it always did. No %s ever takes a number.
+		const uint32_t caps = __atomic_load_n(&gAgdcCapsKind, __ATOMIC_RELAXED);
+		if (caps && (attribute == 0x711 || attribute == 0x921)) {
+			auto inWord = [in, inLength](uint32_t i) -> unsigned {
+				return in && inLength >= (static_cast<unsigned long>(i) + 1) * sizeof(unsigned long)
+				         ? static_cast<unsigned>(in[i]) : 0;
+			};
+			auto outWord = [o, size](uint32_t i) -> unsigned {
+				return o && size >= (static_cast<unsigned long>(i) + 1) * 4
+				         ? static_cast<unsigned>(*reinterpret_cast<const uint32_t *>(o + 4 * i)) : 0;
+			};
+			rdna4Log("AMDRadeonRDNA4: accel: agdccaps=%u: AGDC attribute 0x%x (in %lu, out %lu): 0x%x; in[0..3] %#x %#x %#x %#x; "
+			         "out[0..3] %#x %#x %#x %#x\n", caps, attribute, inLength, size, r, inWord(0), inWord(1), inWord(2), inWord(3),
+			         outWord(0), outWord(1), outWord(2), outWord(3));
+			return r;
 		}
 		static uint32_t logged;
 		if (logged++ < 32)
@@ -1040,6 +1129,14 @@ int accelTo(int value)
 	uint32_t gammaKind = 0;
 	if (Trial::option("rdna4-accelgamma", gammaKind))
 		__atomic_store_n(&gAccelGammaKind, gammaKind, __ATOMIC_RELAXED);
+	// (rdna4-agdccaps, docs/hdr-agdc-caps.md) The 0x711 per-plane capability records and the per-call AGDC log: same reason,
+	// same place, off unless armed. 1 = the paravirtual-shaped record, 2 = AMDRadeonX6000's own numbers.
+	uint32_t capsKind = 0;
+	if (Trial::option("rdna4-agdccaps", capsKind)) {
+		__atomic_store_n(&gAgdcCapsKind, capsKind, __ATOMIC_RELAXED);
+		rdna4Log("AMDRadeonRDNA4: accel: rdna4-agdccaps=%u: the 0x711 gamma and linearization records get a plane mask, a type "
+		         "and the table's entry count; every 0x711/0x921 call is logged\n", capsKind);
+	}
 	if (!gAccel) {
 		for (const Derived &d : kDerived) {
 			const OSMetaClass *base = d.ours->getSuperClass();
