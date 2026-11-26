@@ -346,6 +346,21 @@ mach_vm_address_t gPlaneIOSurface;   // IOAccelDisplayPipeTransaction2::getPlane
 IOGraphicsAccelerator2 *ourAccelerator();
 const uint8_t *gPipes[8];   // (diagnostic, debug.rdna4_accelpipes) our display pipes by framebuffer index (init)
 
+// The plane gamma table objects (docs/hdr-accel-gamma.md, the trial option rdna4-accelgamma). Four members of
+// IOAcceleratorFamily2, none of them virtual, so each is solved by name when the family loads rather than reached through a thunk:
+// the two factories the family makes its objects with, and the two setters its display pipe keeps them in.
+mach_vm_address_t gGammaTableWithData;   // IOAccelDisplayPipeGammaTable2::withGammaTableData(IOAccelDisplayPipeGammaTableData *)
+mach_vm_address_t gPreCSCLinWithArgs;    // IOAccelDisplayPipePreCSCLinearizationVID::withArgs(IOAccelDisplayPipePreCSCLinearizationArgs *)
+mach_vm_address_t gSetPlaneGammaTable;   // IOAccelDisplayPipe::set_current_plane_gamma_table(unsigned int, IOAccelDisplayPipeGammaTable2 *)
+mach_vm_address_t gSetPipePreCSCLin;     // IOAccelDisplayPipe::set_current_pipe_precsclinearization_vid(IOAccelDisplayPipePreCSCLinearizationVID *)
+// Where those two store (IOAcceleratorFamily2 0x145cbf76 and 0x145cbebe): [pipe+0x240] is a per-plane state array of 0x70-byte
+// records with the plane's gamma table at +0x40; the pipe's pre-CSC linearization is at the state's +0x158. Both retain what they
+// store and release what they replace (nothing checks the plane index: only 0 is passed below).
+constexpr size_t kPipePlaneState = 0x240, kPipePlaneStride = 0x70, kPipePlaneGamma = 0x40, kPipePreCSCLin = 0x158;
+// The option's value, read once in accelTo (before any pipe exists: the pipes are made by the display machine's start, step 3), so
+// that a pipe's init does no NVRAM work. 0 (the default, and every boot that does not arm it): nothing is made, nothing logged.
+uint32_t gAccelGammaKind;
+
 class RDNA4DisplayPipe : public IOAccelDisplayPipe {
 	OSDeclareDefaultStructors(RDNA4DisplayPipe)
 	using super = IOAccelDisplayPipe;
@@ -383,7 +398,93 @@ public:
 			return false;
 		if (index < 8)
 			gPipes[index] = reinterpret_cast<const uint8_t *>(this);
+		gammaAttach();
 		return true;
+	}
+	// (rdna4-accelgamma, off by default) The plane 0 gamma table and the pipe's pre-CSC linearization object: what a display pipe
+	// that can be asked about a plane's gamma holds (docs/hdr-accel-gamma.md §2). Both are made *before* either is attached, so a
+	// failure leaves the pipe exactly as the family made it; nothing here touches the DCN (the objects are data the family copies).
+	// The ramps are the identity, `kind` 1 for 1024 entries of 10 bits (what the framebuffer's own IOFBGamma* publish) and 2 for 256
+	// of 12 (the wider type CoreDisplay's walk prefers, docs/hdr-userspace-gating.md §8.1).
+	void gammaAttach()
+	{
+		const uint32_t kind = __atomic_load_n(&gAccelGammaKind, __ATOMIC_RELAXED);
+		if (!kind)
+			return;   // (nothing made, nothing logged: the boot is the one it was)
+		const uint32_t count = kind == 2 ? 256 : 1024;
+		const uint32_t bits = kind == 2 ? 12 : 10;
+		const uint8_t *const base = reinterpret_cast<const uint8_t *>(this);
+		const uint32_t index = *reinterpret_cast<const uint32_t *>(base + 0x284);   // getFramebufferIndex
+		void *const state = *reinterpret_cast<void *const *>(base + kPipePlaneState);
+		if (!state || !gGammaTableWithData || !gPreCSCLinWithArgs || !gSetPlaneGammaTable || !gSetPipePreCSCLin) {
+			rdna4Log("AMDRadeonRDNA4: accel: pipe %p (framebuffer %u): rdna4-accelgamma=%u: %s: nothing attached\n", this, index, kind,
+			         state ? "a function the family does not have here" : "no plane state");
+			return;
+		}
+		// the gamma table: its header and `count` identity entries, in the one blob the family's init copies
+		const size_t tableBytes = sizeof(IOAccelDisplayPipeGammaTableData) + size_t(count) * sizeof(IOAccelGammaTableEntry);
+		OSObject *gamma = nullptr;
+		if (auto *table = static_cast<uint8_t *>(IOMalloc(tableBytes))) {
+			auto *d = reinterpret_cast<IOAccelDisplayPipeGammaTableData *>(table);
+			d->count = count;
+			d->unknown = 0;
+			d->minimumValue = 0.0f;
+			d->maximumValue = 1.0f;
+			auto *e = reinterpret_cast<IOAccelGammaTableEntry *>(table + sizeof(*d));
+			for (uint32_t i = 0; i < count; i++) {
+				const float v = count > 1 ? static_cast<float>(i) / static_cast<float>(count - 1) : 0.0f;
+				e[i].red = e[i].green = e[i].blue = v;
+				e[i].unused = 0.0f;
+			}
+			using WithData = OSObject *(*)(const IOAccelDisplayPipeGammaTableData *);
+			gamma = reinterpret_cast<WithData>(gGammaTableWithData)(d);
+			IOFree(table, tableBytes);
+		}
+		// the linearization: the header and a 256-entry 16-bit identity ramp (the type/format/configurationID fields are copied but
+		// nothing here interprets them: see the doc's "not verified")
+		const size_t linBytes = 256 * sizeof(uint16_t);
+		const size_t blobBytes = sizeof(IOAccelDisplayPipePreCSCLinearizationArgs) + linBytes;
+		OSObject *linearization = nullptr;
+		if (auto *blob = static_cast<uint8_t *>(IOMalloc(blobBytes))) {
+			auto *a = reinterpret_cast<IOAccelDisplayPipePreCSCLinearizationArgs *>(blob);
+			a->unknown = 0;
+			a->plane = 0;
+			a->type = 0;
+			a->format = 0;
+			a->configurationID = 0;
+			a->minimumValue = 0.0f;
+			a->maximumValue = 1.0f;
+			a->size = linBytes;
+			auto *ramp = reinterpret_cast<uint16_t *>(blob + sizeof(*a));
+			for (size_t i = 0; i < 256; i++)
+				ramp[i] = static_cast<uint16_t>(i * 65535u / 255u);
+			using WithArgs = OSObject *(*)(const IOAccelDisplayPipePreCSCLinearizationArgs *);
+			linearization = reinterpret_cast<WithArgs>(gPreCSCLinWithArgs)(a);
+			IOFree(blob, blobBytes);
+		}
+		if (!gamma || !linearization) {
+			rdna4Log("AMDRadeonRDNA4: accel: pipe %p (framebuffer %u): rdna4-accelgamma=%u: gamma table %s, pre-CSC linearization %s: "
+			         "nothing attached\n", this, index, kind, gamma ? "made" : "NOT made", linearization ? "made" : "NOT made");
+			OSSafeReleaseNULL(gamma);
+			OSSafeReleaseNULL(linearization);
+			return;
+		}
+		// attached: both setters retain their argument, so the reference the factory gave us is released and the pipe keeps the last one
+		reinterpret_cast<void (*)(IOAccelDisplayPipe *, uint32_t, OSObject *)>(gSetPlaneGammaTable)(this, 0, gamma);
+		reinterpret_cast<void (*)(IOAccelDisplayPipe *, OSObject *)>(gSetPipePreCSCLin)(this, linearization);
+		gamma->release();
+		linearization->release();
+		// what the pipe holds now (the only readable proof: these classes are OSObjects, so no registry entry shows them)
+		const auto *s = static_cast<const uint8_t *>(__atomic_load_n(reinterpret_cast<void *const *>(base + kPipePlaneState), __ATOMIC_RELAXED));
+		const void *const planeSlot = *reinterpret_cast<const void *const *>(s + 0u * kPipePlaneStride + kPipePlaneGamma);   // plane 0
+		const void *const linSlot = *reinterpret_cast<const void *const *>(s + kPipePreCSCLin);
+		char verdict[112];
+		snprintf(verdict, sizeof(verdict), "%ux%u gamma table on plane 0: %s; pre-CSC linearization: %s", count, bits,
+		         planeSlot ? "attached" : "NOT attached", linSlot ? "attached" : "NOT attached");
+		setProperty("RDNA4AccelGamma", verdict);
+		rdna4Log("AMDRadeonRDNA4: accel: pipe %p (framebuffer %u): rdna4-accelgamma=%u: gamma table %p (%ux%u, %lu bytes), linearization "
+		         "%p (%lu bytes): plane 0 slot %p, linearization slot %p: %s\n", this, index, kind, gamma, count, bits,
+		         static_cast<unsigned long>(tableBytes), linearization, static_cast<unsigned long>(blobBytes), planeSlot, linSlot, verdict);
 	}
 	uintptr_t validateTransaction(IOAccelDisplayPipeTransaction2 *t) APPLE_KEXT_OVERRIDE
 	{
@@ -823,6 +924,24 @@ void familyLoaded(uint32_t kext, KernelPatcher &patcher, size_t index, mach_vm_a
 		                                            "__ZN16IOAccelSysMemory20withMemoryDescriptorEP22IOGraphicsAccelerator2P16IOAccelResource2P18IOMemoryDescriptor",
 		                                            address, size);
 		patcher.clearError();
+		// the plane gamma table's objects (rdna4-accelgamma, docs/hdr-accel-gamma.md): the two factories and the two setters, by
+		// name (none is virtual). Optional: a miss leaves the option unable to act, not the family unusable.
+		gGammaTableWithData = patcher.solveSymbol(index,
+		                                          "__ZN29IOAccelDisplayPipeGammaTable218withGammaTableDataEP32IOAccelDisplayPipeGammaTableData",
+		                                          address, size);
+		patcher.clearError();
+		gPreCSCLinWithArgs = patcher.solveSymbol(index,
+		                                         "__ZN40IOAccelDisplayPipePreCSCLinearizationVID8withArgsEP41IOAccelDisplayPipePreCSCLinearizationArgs",
+		                                         address, size);
+		patcher.clearError();
+		gSetPlaneGammaTable = patcher.solveSymbol(index,
+		                                          "__ZN18IOAccelDisplayPipe29set_current_plane_gamma_tableEjP29IOAccelDisplayPipeGammaTable2",
+		                                          address, size);
+		patcher.clearError();
+		gSetPipePreCSCLin = patcher.solveSymbol(index,
+		                                        "__ZN18IOAccelDisplayPipe40set_current_pipe_precsclinearization_vidEP40IOAccelDisplayPipePreCSCLinearizationVID",
+		                                        address, size);
+		patcher.clearError();
 	}
 	uint32_t missing = 0, wrongSlots = 0, thunks = 0, folded = 0;
 	for (size_t i = 0; i < kThunks; i++) {
@@ -916,6 +1035,11 @@ int accelTo(int value)
 	IOService *gpu = RDNA4AccelCensus::gpu();
 	if (!gReady || !gpu)
 		return ENODEV;
+	// (rdna4-accelgamma, read here and not in a pipe's init: before any pipe is made at step 3, and no NVRAM work under the family's
+	// lock. Off unless armed: no built-in default, and a boot without it makes and logs nothing — the boot is the one it was.)
+	uint32_t gammaKind = 0;
+	if (Trial::option("rdna4-accelgamma", gammaKind))
+		__atomic_store_n(&gAccelGammaKind, gammaKind, __ATOMIC_RELAXED);
 	if (!gAccel) {
 		for (const Derived &d : kDerived) {
 			const OSMetaClass *base = d.ours->getSuperClass();

@@ -538,3 +538,211 @@ base**, and `nm`/`otool` cannot open cache-only images at all.
 | No vendor/product whitelist blocks a non-Apple panel; the table is Apple-only exclusion | **[dis]** §2 | proven (control flow); **[inf]** on the "vendor/product" reading of the two dwords |
 | `hdr-policy` per-display pref can disable HDR, currently unset | **[dis]** + **[log]** | proven |
 | The minimal fix is a plane gamma capability + modern timing range + per-mode colour fields | synthesis of the above | **hypothesis**, testable with §4.3/§5 |
+
+---
+
+# §8 (follow-up, 2026-11-26 07:40–08:05): which value is zero at "plane with no gamma"
+
+The lead implemented the NDRV gamma selectors (`cscGetGamma` 8, `cscGetGammaInfoList` 20,
+`cscRetrieveGammaTable` 21, `cscSetGamma` 4) behind a trial option. The kernel accepted them
+(`IONDRVFramebuffer::checkDriver` walked Get → List(FindFirst) → Retrieve(6156 B) → List(0) →
+NoMoreTables) and the framebuffer publishes `IOFBGammaWidth=10`, `IOFBGammaCount=1024`,
+`IOFBGammaHeaderSize=12` instead of the 8/256 fallback. **`plane with no gamma` still fires and
+`hdr-policy` is still never logged.** This section says why, with the exact code.
+
+Measurement note: this boot is the plain one (`rdna4-dispclk=1070` consumed by the trial mechanism),
+so the framebuffer is back on the 8/256 fallback — measured `IOFBGammaWidth=8`, `IOFBGammaCount=256`,
+`IOFBGammaHeaderSize=12` on 4 nodes, and `logGammaTransferInfoForDevice: Gamma values red: 0.000000 ...
+0.501961 ... 1.000000` (0.501961 = 128/255 = the 256-entry 8-bit middle). The counts below are from
+that boot, i.e. the gamma-table-present boot should be re-measured with `rdna4-gamma=1` (§8.6).
+
+## 8.1 The zero is a **count**, not a null pointer
+
+`CoreDisplay::IOPCapabilities::GammaChannelTableEntryCountAndType() const`
+= CoreDisplay **+0x117D2**, unslid `0x7FF80536C7D2` (identified by its own `__func__` string, which
+sits immediately before the message in `__cstring`). **[dis]**
+
+```
+0x7FF80536C7E6   lock(this+0x10)
+0x7FF80536C7EB   rax = [this+8]            ; the sPipelineDictionary (see 6.2); NULL → "capabilities when none exist"
+0x7FF80536C7F8   rax = [rax+0xB0]          ; the planelist object          (NO null check — it must exist)
+0x7FF80536C7FF   rcx = [rax+0x90]          ; the plane array base          (NO null check)
+0x7FF80536C806   rax = [rcx+0x88]          ; ★ plane[0].gammaEntryCount   ← THE VALUE
+0x7FF80536C80D   test rax,rax ; je 0x7FF80536C9AB   ; zero → log "Attempting to get capabilities from plane with no gamma"
+0x7FF80536C816   rcx = [rcx+0x90]          ; plane[0].gammaEntries (array)
+0x7FF80536C81D   rcx += 0x30
+0x7FF80536C96C   add rcx,0x38 ; dec rax ; jne 0x7FF80536C82C   ; walk `count` entries of 0x38 bytes
+                 …picks the widest entry type among {16,12,10,8} bits (cmp rdx,0x10/0xc/0xa/8)
+```
+
+So the value tested at the print site is **`plane[0] + 0x88`, the number of gamma-channel-table entries
+CoreDisplay was told this plane has**. It is zero. It is *not* a NULL pointer: `[dict+0xB0]` and
+`[[dict+0xB0]+0x90]` are dereferenced unconditionally before the test, and we reach the log instead of
+crashing — so **the planelist and plane[0] both exist, and only the gamma table is missing.** The log
+message is `IOPCapabilities.cpp` line `0x2D8` (immediate at `0x7FF80536C98F`).
+
+Adjacent fields of the same plane record (stride **0xA8**, **[dis]** from
+`sub_11A04`/`sub_11CD2`):
+
+| plane offset | meaning |
+|---|---|
+| `+0x10` | 64-bit capability mask (`test [plane+0x10], rax` in `sub_11CD2`) |
+| `+0x78` / `+0x80` | (count, entries) pair used by `sub_11A04` — a *different* capability |
+| **`+0x88` / `+0x90`** | **(entries, pointer) for the gamma channel table — our zero** |
+| `+0xEA` (in `IOPCapabilities`, not the plane) | the 4-bit HDR/EOTF mask read by `sub_51B7E` gate 2 (§1.2) — `test byte [x+0xEA], 0x1E` in `sub_50772+0x81` |
+
+The log's *sibling* messages name the other terms: `... plane with no 3-channel gamma table support`,
+`... plane with no 3-channel linearization table support`, `... device with no planes`,
+`... device without plane index %u`. **[dis]** On the measured boot: `device with no planes` = **0**,
+`plane with no gamma` = **60** — i.e. planes exist, gamma does not. **[log]**
+
+## 8.2 Who is supposed to fill it — and it is not the framebuffer
+
+`plane[0]+0x88` is written by the code that parses `sPipelineDictionary`:
+
+```
+DisplayPipe ctor  sub_D470 (= CoreDisplay +0xD470, 0x7FF805368470)          [dis]
+  0x7FF8053684A2  new(0x9B0)                      ; the pipe impl
+  0x7FF8053685A6  new(0xB8) → zeroed, [obj+0xB0]=0 ; ★ the empty "sPipelineDictionary"
+  0x7FF8053685FC  call LoadCapabilities(presentmentRef=[rbx+0x80], dict=[rbx+0x88])
+  0x7FF80536860C  if (did not load) { release dict; [rbx+0x88] = NULL; }     ; then a long field init
+
+LoadCapabilities = CoreDisplay +0x10CC9 (0x7FF80536BCC9)                    [dis]
+  if (!dict)                                → log "LoadCapabilities" (IOPCapabilities.cpp:0x1B)
+  rbx = alloc(presentmentRef)               ; 0x7FF80536BD0F's callee
+  status = <external call>(presentmentRef, rbx, dict)    ; ★ THE PARSER, 0x7FF80536BD0F
+  if (status != 0 && status != 0x2002)      → log "Failed to get capabilities: %s"
+  if (dict->qword[0xA8] == 0)               → fail (IOPCapabilities.cpp:0x31)
+  if ([[dict+0xB0]+0x88] == 0)              → log "Attempting to get capabilities from device with no planes" (:0x37)
+  …
+```
+
+The external call at `0x7FF80536BD0F` is a stub into **`/System/Library/PrivateFrameworks/IOAccelerator.framework/IOAccelerator`**.
+Proof: CoreDisplay `dlopen`s that exact path (`__cstring` `0x7FF805472141`, at `0x7FF8053E8387`) and then
+`dlsym`s **14** symbols from a relative-offset name table at `0x7FF805451E3C` (`__TEXT,__const`), storing
+them in a global API table at `0x7FF843AD8380`; if any `dlsym` fails the whole table is abandoned and the
+global `0x7FF843AD83F8` is still set (`…+0x3F1`). Decoded names (**[dis]**, offsets rel. to the table):
+
+```
+IOAccelDisplayPipeCreate              IOAccelDisplayPipeRelease
+IOAccelDisplayPipeTransactionBegin    IOAccelDisplayPipeTransactionSetPlaneEmpty
+IOAccelDisplayPipeTransactionSetPlaneIOSurface
+IOAccelDisplayPipeTransactionSetOptions
+IOAccelDisplayPipeTransactionEnd      IOAccelDisplayPipeTransactionWait
+IOAccelDisplayPipeCreateSetVBLNotifyPort   IOAccelDisplayPipeRequestVBLNotifyCallback
+IOAccelDisplayPlaneGammaTable         ← ★ the gamma query
+IOAccelDisplayPipeTransactionSetPipePreGammaTable
+IOAccelDisplayPipeTransactionSetPipePostGammaTable
+IOAccelDisplayPipeTransactionSetPipeColorMatrix
+```
+
+**Conclusion: the plane capability word — including its gamma entry count — comes from the
+accelerator's `IOAccelDisplayPipe`, through IOAccelerator.framework. The framebuffer/NDRV side cannot
+fill it.**
+
+## 8.3 Q1 — do `IONDRVFramebuffer`/`IOFramebuffer` gamma entry points answer this? **No.**
+
+Kernel-collection inventory (`strings /home/Celia/kc/SystemKernelExtensions.kc`, **[dis]** on symbols):
+
+| symbol | kind |
+|---|---|
+| `IONDRVFramebuffer::setGammaTable(uint32,uint32,uint32,void*)` (+ `…,bool)` variant) | **set** |
+| `IOFramebuffer::setGammaTable(…)[,bool]`, `updateGammaTable(...)`, `saveGammaTables()`, `setCLUTWithEntries(...)`, `checkDeferredCLUTSet()`, `deferredCLUTSetTimer(...)` | all **set/update** |
+| `IOFramebuffer::extSetGammaTable`, `extSetCLUTWithEntries`, `extSetColorConvertTable`, `extSetHibernateGammaTable` | user-client **setters** |
+| `IODisplay::getGammaTableByIndex(unsigned int*,unsigned int*,unsigned int*,void**)` | the **only** "get … by index" in the whole KC — and it is on **IODisplay**, not on `IOFramebuffer`, and is not part of `IOFramebufferUserClient` |
+
+* There is **no `getGammaTable`/`getGammaTableByIndex` on `IOFramebuffer` or `IONDRVFramebuffer`** in
+  this build, and **no gamma getter in the IOFramebuffer user client** — so nothing we implement in
+  `setGammaTable`/`cscGetGamma` can be *read back* by CoreDisplay through the framebuffer.
+* CoreDisplay does not import any IODisplay gamma symbol either (its imports contain only
+  `IOServiceMatching`/`IOServiceGetMatchingServices`/`IOConnectCall*` and `_kCGDisplayEDIDKey`); the only
+  gamma API it uses is the dlsym'd IOAccelerator set above.
+* Our gamma work is real but on a **different path**: the CLUT/colour-management path, which is what
+  `CGXSetDisplayColorProfileAndTransfer` / "using last created GPU Gamma2 Table" (19 078 lines on this
+  boot) / `logGammaTransferInfoForDevice` show. It will matter for actually *programming* a plane gamma
+  once one exists (`PerformPlaneGammaTransaction`), not for the capability word.
+
+## 8.4 Q2 — is the "plane" an accel plane? **Yes, and we already have the pipe but not the gamma objects.**
+
+Registry census on this machine (read-only `ioreg`, **[log]**):
+
+| class / key | count | note |
+|---|---|---|
+| `IOAccelerator` | 1 | our `RDNA4Accelerator`, id `0x1000005ab` |
+| `IOAccelDisplayPipe` | **1** | an `IOAccelDisplayPipe` **exists** |
+| `RDNA4DisplayPipe` | 4 | our subclass instances |
+| `IOAccelDisplayPipeUserClient2` | 1 | created (child of `RDNA4Accelerator`) |
+| `IOAccelerationUserClient` | 1 | |
+| published capability | — | `"IOAccelDisplayPipeCapabilities" = {"DisplayPipeSupported"=Yes,"TransactionsSupported"=Yes}` |
+| **`IOAccelDisplayPipeGammaTable2`** | **0** | ← the gamma table object CoreDisplay needs |
+| **`IOAccelDisplayPipePreCSCLinearizationVID`** | **0** | ← the linearization object (`SupportsLinearization`) |
+| **`IOAccelDisplayPipePostCSCGammaVID`** | **0** | |
+| `GammaTable`, `Linearization` | 0, 0 | |
+
+`Unable to find display pipe for IOFB service / regID: 0x390b / 0x1000004b1` appears **once** in the
+log, for a different registry id than the one that is queried afterwards — i.e. not fatal for the display
+we care about. The pipe-level capability dictionary is exactly the two keys above, and it contains **no
+gamma/linearization entry**, which is precisely the missing field.
+
+So the answer to Q2 is "yes — accel plane", and the gap is narrow: the pipe exists, its *plane gamma/
+linearization objects* do not.
+
+## 8.5 Q3 — is gamma only one of several inputs? **Yes, several — but all from the same dictionary.**
+
+`IOPCapabilities` is one object parsed from one dictionary: per-plane pixel formats, CSC, EOTF,
+linearization, gamma and box support are separate *(count, entries)* pairs in the same 0xA8-byte plane
+record (`+0x10`, `+0x78/0x80`, `+0x88/0x90`, …). They are **not** fed by `kIOFBTimingRange`,
+`kConnectionColorDepthsSupported`, `' bpc'` or `'colr'`: those belong to the *other* gate, the
+`InstallTiming` legacy path (§1.5), which logs `legacyRng_legacyEnc_legacyBit_legacyClr` and fails with
+`kIOReturnUnsupported`. Fixing the timing range without the plane capabilities will not move
+`SLSDisplaySupportsHDRMode`; fixing the plane capabilities may still leave `InstallTiming` legacy.
+
+## 8.6 Smallest change on our side
+
+Everything needed is already in IOAcceleratorFamily2 (in the KC); we only have to create and attach the
+objects, in the accelerator's display-pipe bring-up:
+
+1. **Create a gamma table object for the plane**
+   `IOAccelDisplayPipeGammaTable2` (`__ZN31IOAccelDisplayPipeGammaTable2*`), initialised from an
+   `IOAccelDisplayPipeGammaTableArgs` (`__ZN32IOAccelDisplayPipeGammaTableArgs`), and attach it with
+   `IOAccelDisplayPipe::set_current_plane_gamma_table(uint32 plane, IOAccelDisplayPipeGammaTable2*)`
+   (`__ZN18IOAccelDisplayPipe29set_current_plane_gamma_tableEjP29IOAccelDisplayPipeGammaTable2`).
+   The args carry the entry count / width / channel count — this is the number that must become
+   non-zero at plane `+0x88`.
+2. **Create the pre-CSC linearization object** —
+   `IOAccelDisplayPipePreCSCLinearizationVID::withArgs(IOAccelDisplayPipePreCSCLinearizationArgs*)`
+   (`__ZN40IOAccelDisplayPipePreCSCLinearizationVID8withArgsEP41IOAccelDisplayPipePreCSCLinearizationArgs`)
+   and attach with `set_current_pipe_precsclinearization_vid(...)`; this is what
+   `SupportsLinearization`/`IsLinearizationTableBased` ask for, and EOTF support is gated behind it.
+3. **Hook the transaction** `_fSymFBCLASSPerformPlaneGammaTransaction`
+   (`PerformPlaneGammaTransaction`, cf. `IGAccelDisplayPipe::PerformGammaTransaction` /
+   `PerformPQTransaction`) so the pipe can program what it advertises; the user-client selectors already
+   exist (`IOAccelDisplayPipeUserClient2::transactionSetPlaneGammaTable(IOAccelDisplayPipeGammaTableArgs*)`,
+   `…transactionSetPipePreCSCLinearizationVID(…)`).
+4. If `IOAccelDisplayPipe::copyCapabilities()` (`__ZN18IOAccelDisplayPipe16copyCapabilitiesEv`) is what
+   builds the dictionary, its override in `RDNA4DisplayPipe` must include the per-plane gamma/
+   linearization entries — **[hyp]**: I could not disassemble it (it lives in the KC, and this box has no
+   KC Mach-O symbolizer wired up), so whether the dictionary is built from the attached objects or from
+   registry children of the pipe is the one remaining unknown. The *class inventory* (0 gamma objects
+   vs 1 pipe) plus the CoreDisplay parse is what makes this the prime suspect, not a proof.
+
+Necessary vs sufficient, again honestly: creating the objects is **necessary** (the count must be
+non-zero); it is **not proven sufficient** — `SupportsEOTF` may additionally require the linearization
+object (item 2), the CSC/colour-matrix capability, and the still-unexplained mode comparison in
+`sub_51B7E` (§1.2 gate 4).
+
+**Cheapest next measurement** (no code change, one boot): arm `rdna4-gamma=1` and repeat §8.1/§8.4:
+`plane with no gamma` must go to **0** *only if* the accel path also changed; with the framebuffer-only
+change it will stay at ~60, which confirms this section. The discriminating counters are
+`plane with no gamma`, `device with no planes`, `hdr-policy` (appears ⇔ `word[IOPCapabilities+0xEA] != 0`),
+and `logGammaTransferInfoForDevice`'s middle value (0.501961 = 8-bit/256 fallback, 0.500489 = 1023/2 for a
+1024-entry 10-bit table — that tells us whether the *other* gamma path consumed the new table).
+
+## 8.7 What this changes in §3
+
+§3.2 item 4 ("give the framebuffer plane a real gamma table") was **wrong about the channel**, and the
+§7 line "the plane capability comes from gamma/linearization tables on the framebuffer" is hereby
+corrected: the tables are needed, but they must be published **on the accelerator's
+`IOAccelDisplayPipe`**, not on the NDRV/framebuffer gamma path. §3.2 items 5–6 (modern timing range,
+per-mode colour fields) are unaffected — they are the *other* gate. Everything else in §1–§5 stands; the
+"gamma" hypothesis was right about the *missing input* and wrong about the *wire*.

@@ -885,3 +885,58 @@ private:
 };
 static_assert(sizeof(AppleGraphicsDeviceControl) == 0x110, "the KDK's size");
 enum : size_t { kAppleGraphicsDeviceControlSize = 0x110 };
+
+// ---------------------------------------------------------------------------------------------------------------
+// Hand-added, NOT generated (tools/gen/accelgen.py rewrites this file: keep these two blocks when it is next run,
+// or move them into the generator's output — docs/hdr-accel-gamma.md says which symbols they belong to).
+//
+// The display pipe's gamma objects: IOAcceleratorFamily2's `IOAccelDisplayPipeGammaTable2` and
+// `IOAccelDisplayPipePreCSCLinearizationVID` are OSObjects (not IOServices, so no registry entry and no metaclass
+// here: they are made by the family's own factories, solved by name in rdna4accel.cpp). Their *data* is what we fill.
+// Layouts read off /home/Celia/kc/SystemKernelExtensions.kc (IOAcceleratorFamily2, x86_64, macOS 26.6.2):
+//   IOAccelDisplayPipeGammaTable2::init(Data *) at 0x145d1540: size = 0x10 + count*0x10, count from +0x00, max 0x20000,
+//     the whole blob copied; getters: min = +0x08, max = +0x0c, count = +0x00, entry i at +0x10 + i*0x10 (r,g,b floats).
+//   IOAccelDisplayPipePreCSCLinearizationVID::init(Args *) at 0x145d1806: plane = +0x04, type = +0x08, format = +0x10,
+//     configurationID = +0x18, min = +0x20, max = +0x24, size = +0x28, the data copied from +0x30.
+// ---------------------------------------------------------------------------------------------------------------
+
+// The header in front of a plane gamma table's entries.
+struct IOAccelDisplayPipeGammaTableData {
+	uint32_t count;          // +0x00 the entry count (the number CoreDisplay reads per plane; 0 = "plane with no gamma")
+	uint32_t unknown;        // +0x04 not read by the family's init (copied verbatim): unknown, needs a measurement
+	float minimumValue;      // +0x08 getTableMinValue
+	float maximumValue;      // +0x0c getTableMaxValue
+};
+
+// One gamma table entry: three channels as floats, a fourth the getters do not read.
+struct IOAccelGammaTableEntry {
+	float red;
+	float green;
+	float blue;
+	float unused;
+};
+
+// What IOAccelDisplayPipeUserClient2's `transactionSetPlaneGammaTable` (selector 5) takes: 0x18 bytes of header, then
+// `data.count` entries. `framebuffer` is matched against the pipe's framebuffer resource (+0x54) by the family.
+struct IOAccelDisplayPipeGammaTableArgs {
+	uint32_t framebuffer;                          // +0x00
+	uint32_t plane;                                // +0x04
+	IOAccelDisplayPipeGammaTableData data;         // +0x08
+};
+
+// What `transactionSetPipePreCSCLinearizationVID` (selector 10) takes: this header, then `size` bytes of data at +0x30.
+struct IOAccelDisplayPipePreCSCLinearizationArgs {
+	uint32_t unknown;        // +0x00 not read by the family's init: unknown, needs a measurement
+	uint32_t plane;          // +0x04 getPlane
+	uint64_t type;           // +0x08 getType (the object copies 8 bytes)
+	uint64_t format;         // +0x10 getFormat
+	uint64_t configurationID;// +0x18 getConfigurationID
+	float minimumValue;      // +0x20 getMinimumValue
+	float maximumValue;      // +0x24 getMaximumValue
+	uint64_t size;           // +0x28 getSize, the data's length (the data itself starts at +0x30)
+};
+
+static_assert(sizeof(IOAccelDisplayPipeGammaTableData) == 0x10, "the family's init reads count, min and max from here");
+static_assert(sizeof(IOAccelGammaTableEntry) == 0x10, "IOAccelDisplayPipeGammaTable2::getTableEntry strides entries by 0x10");
+static_assert(sizeof(IOAccelDisplayPipeGammaTableArgs) == 0x18, "selector 5 refuses an input shorter than 0x18 + count*0x10");
+static_assert(sizeof(IOAccelDisplayPipePreCSCLinearizationArgs) == 0x30, "the linearization data starts at +0x30");
