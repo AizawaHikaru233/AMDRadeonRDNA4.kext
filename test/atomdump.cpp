@@ -609,6 +609,215 @@ static bool buildSynthEdid(uint8_t out[256]) {
 	return true;
 }
 
+// The Samsung's DisplayID block 2 as the card read it (2026-11-15), appended to the Samsung's base+CTA block: five Type
+// I timings — 3840x2160@120 (1.188 GHz), 3840x2160@144.05 (1.33275 GHz), 3840x2160@60 (533.25 MHz), 2560x1440@144
+// (604.25 MHz), 1920x1080@144 (346.5 MHz). Shared by the mode-table checks and by testDscModes (U1: which of them the
+// uncompressed cap keeps out and the DSC cap lets in).
+static bool buildFiveTimingEdid(uint8_t full[384]) {
+	uint8_t samsung[256];
+	if (!hexToBytes(kSamsungEdidHex, samsung, sizeof(samsung)))
+		return false;
+	static const uint32_t five[5][7] = {   // kHz, h active/blank/fp/sw, v active/blank (v fp/sw below)
+		{ 1188000, 3840, 560, 176, 88, 2160, 90 }, { 1332750, 3840, 160, 48, 32, 2160, 154 },
+		{ 533250, 3840, 160, 48, 32, 2160, 62 }, { 604250, 2560, 160, 48, 32, 1440, 103 },
+		{ 346500, 1920, 160, 48, 32, 1080, 77 } };
+	static const uint32_t vsync[5][2] = { { 8, 10 }, { 3, 5 }, { 3, 5 }, { 3, 5 }, { 3, 5 } };
+	memset(full, 0, 384);
+	memcpy(full, samsung, 256);
+	uint8_t *b2 = full + 256;
+	b2[0] = 0x70; b2[1] = 0x13; b2[2] = 3 + 5 * 20; b2[5] = 0x03; b2[7] = 5 * 20;
+	for (int i = 0; i < 5; i++) {
+		uint8_t *d = b2 + 8 + 20 * i;
+		const uint32_t f[8] = { five[i][1], five[i][2], five[i][3] | 0x8000u, five[i][4], five[i][5], five[i][6],
+		                        vsync[i][0], vsync[i][1] };
+		const uint32_t clock = five[i][0] / 10 - 1;
+		d[0] = clock & 0xff; d[1] = (clock >> 8) & 0xff; d[2] = clock >> 16;
+		for (int k = 0; k < 8; k++) {
+			const uint32_t v = f[k] - 1;   // the polarity bit survives: fp is at least 1
+			d[4 + 2 * k] = v & 0xff;
+			d[5 + 2 * k] = (v >> 8) & 0xff;
+		}
+	}
+	uint8_t sum = 0;
+	for (int i = 0; i < 127; i++)
+		sum += b2[i];
+	b2[127] = static_cast<uint8_t>(-sum);
+	full[126] = 2;   // the base block announces both extensions
+	uint8_t s0 = 0;
+	for (int i = 0; i < 127; i++)
+		s0 += full[i];
+	full[127] = static_cast<uint8_t>(-s0);
+	return true;
+}
+
+// --- U1: the compressed-mode rule (docs/dsc-modes-u1.md) ---------------------
+//
+// Two pure functions decide which timings a link can only carry compressed, and neither needs a card:
+//
+//   Modes::dscCap()    the highest pixel clock such a timing may reach = min(DISPCLK the SMU is asked to hold, the
+//                      slice counts both ends offer times the sink's per-slice throughput, the link's budget at bpp);
+//   Modes::dscLayout() the slice choice for one raster (per-slice throughput, the counts both ends offer, the sink's
+//                      max slice width, one vertical slice).
+//
+// Then Modes::build() twice on one EDID — cap 0 (every boot before U1) and cap raised — to prove the uncompressed modes
+// keep their slots, IDs and order and the compressed ones join after them. The sink is the machine's own: DPCD
+// 0x060..0x06f decoded by testDsc() above.
+static int testDscModes() {
+	using Modes::Mode;
+	int failures = 0;
+	const uint8_t raw[Dsc::kDpcdCapBytes] = { 0x01, 0x21, 0x03, 0x7f, 0x3b, 0x07, 0x01, 0x00,
+	                                          0x00, 0x1f, 0x0e, 0x11, 0x08, 0x00, 0x00, 0x04 };
+	const Dsc::Caps sink = Dsc::decode(raw, true, true, 0x00);
+	const uint32_t linkKHz24 = 720000;   // 4 lanes HBR2: 17.28 Gbps / 24, device.cpp's bootDpLinkKHz
+
+	printf("\ndsc: the compressed-mode rule (U1: the cap and the slice choice)\n");
+
+	// The cap. On this link the terms are 720000 kHz x 24 / 8 bpp = 2160000 (the link) and 4 x 340 = 1360000 (the
+	// slice throughput), so DISPCLK decides — which is exactly why the plan puts S1 before S3/S4.
+	struct { const char *what; uint32_t dispclk, want; } caps[] = {
+		{ "DISPCLK 650 kHz (the kext's default) equals the uncompressed cap, so nothing can join", 650000, 650000 },
+		{ "DISPCLK 1070 (rdna4-dispclk=1070, the S1 measurement)", 1070000, 1070000 },
+		{ "DISPCLK 1340 (4K144 needs 1333.33)", 1340000, 1340000 },
+		{ "DISPCLK 2400: the slice term binds at 4 x 340 = 1360000, so 4K240 stays out", 2400000, 1360000 },
+	};
+	for (auto &c : caps) {
+		const Modes::DscCap cap = Modes::dscCap(sink, linkKHz24, c.dispclk, Modes::kDscBpp8bpc);
+		printf("  %-76s -> %u kHz = min(%u, %u, %u), %u slices, %u bpp\n", c.what, cap.kKHz, cap.clockKHz,
+		       cap.throughputKHz, cap.linkKHz, cap.slices, cap.bpp);
+		failures += check(cap.kKHz == c.want, "dsc cap at DISPCLK %u = %u kHz, expected %u kHz", c.dispclk, cap.kKHz,
+		                  c.want);
+		failures += check(cap.slices == 4 && cap.throughputKHz == 1360000 && cap.bpp == Modes::kDscBpp8bpc,
+		                  "dsc cap terms at DISPCLK %u: %u slices, %u kHz throughput, %u bpp", c.dispclk, cap.slices,
+		                  cap.throughputKHz, cap.bpp);
+		failures += check(cap.linkKHz == 2160000, "the link term at DISPCLK %u is %u kHz, expected 2160000",
+		                  c.dispclk, cap.linkKHz);
+	}
+	// A narrower link binds on its own: 7.2 Gbps of payload is 300000 kHz at 24 bpp, 900000 kHz at 8 bpp — above the
+	// uncompressed 650 MHz cap and below every 4K high-refresh raster, so DSC would buy nothing there.
+	{
+		const Modes::DscCap narrow = Modes::dscCap(sink, 300000, 1340000, Modes::kDscBpp8bpc);
+		failures += check(narrow.linkKHz == 900000 && narrow.kKHz == 900000,
+		                  "a 7.2 Gbps link caps DSC at %u kHz (link term %u), expected 900000", narrow.kKHz,
+		                  narrow.linkKHz);
+	}
+	// 12 bpp (a 10 bpc stream, S5 of the plan) halves the link term to 1440000 kHz: still above the slice term, so the
+	// cap does not move on this link — the bpp is not what decides here.
+	{
+		const Modes::DscCap bpp12 = Modes::dscCap(sink, linkKHz24, 2400000, 12);
+		failures += check(bpp12.linkKHz == 1440000 && bpp12.kKHz == 1360000,
+		                  "12 bpp: link term %u kHz, cap %u kHz; expected 1440000 and 1360000", bpp12.linkKHz, bpp12.kKHz);
+	}
+	// No sink block / no clock / no link: no compressed timing at all.
+	{
+		const Dsc::Caps none {};
+		const Modes::DscCap a = Modes::dscCap(none, linkKHz24, 1070000, Modes::kDscBpp8bpc);
+		const Modes::DscCap b = Modes::dscCap(sink, linkKHz24, 0, Modes::kDscBpp8bpc);
+		const Modes::DscCap c = Modes::dscCap(sink, 0, 1070000, Modes::kDscBpp8bpc);
+		failures += check(a.kKHz == 0 && a.slices == 0, "an unread sink block still gives a cap (%u kHz)", a.kKHz);
+		failures += check(b.kKHz == 0, "no DISPCLK still gives a cap (%u kHz)", b.kKHz);
+		failures += check(c.kKHz == 0, "no link budget still gives a cap (%u kHz)", c.kKHz);
+	}
+
+	// The slice choice, at the sink's own numbers: 340 Mpix/s a slice, counts {1,2,4} (the encoder offers 1..4 of the
+	// sink's {1,2,4,6,8}), max slice 2560 px.
+	struct { const char *what; uint32_t w, h, kHz, slices, sliceW, sliceH; } layouts[] = {
+		{ "3840x2160@60 (the S2 raster: its recorded PPS is 2 x 1920)", 3840, 2160, 533250, 2, 1920, 2160 },
+		{ "2560x1440@240 (995.52 MHz: 3 slices needed, 4 offered)", 2560, 1440, 995520, 4, 640, 1440 },
+		{ "3840x2160@120 (1066.56 MHz)", 3840, 2160, Dsc::kFourK120KHz, 4, 960, 2160 },
+		{ "3840x2160@144.05 (1333.33 MHz)", 3840, 2160, 1333333, 4, 960, 2160 },
+		{ "3840x2160@239.87 needs 8 slices: more than the encoder offers", 3840, 2160, 2418370, 0, 0, 0 },
+		{ "7680x2160 at 2 slices would be 3840 px a slice, above the sink's 2560", 7680, 2160, 594000, 0, 0, 0 },
+	};
+	for (auto &l : layouts) {
+		const Modes::DscLayout out = Modes::dscLayout(sink, l.w, l.h, l.kHz, Modes::kDscBpp8bpc);
+		printf("  %-62s -> %u slices of %u x %u px, %u bpp\n", l.what, out.slices, out.sliceWidth, out.sliceHeight,
+		       out.bpp);
+		failures += check(out.slices == l.slices && out.sliceWidth == l.sliceW && out.sliceHeight == l.sliceH,
+		                  "dsc layout %ux%u at %u kHz: %u slices of %u x %u, expected %u of %u x %u", l.w, l.h, l.kHz,
+		                  out.slices, out.sliceWidth, out.sliceHeight, l.slices, l.sliceW, l.sliceH);
+		failures += check(!out.slices || out.bpp == Modes::kDscBpp8bpc, "dsc layout bpp %u", out.bpp);
+	}
+	// A sink that takes fractional bpp steps cannot be told the whole 8 this code picks: no layout.
+	{
+		Dsc::Caps fractional = sink;
+		fractional.bppIncrementDiv = 4;
+		failures += check(Modes::dscLayout(fractional, 3840, 2160, Dsc::kFourK120KHz, 8).slices == 0,
+		                  "a sink with 1/4 bpp steps still gets a whole-bpp layout");
+	}
+
+	// The table, twice. The fixture is the Samsung base+CTA+DisplayID blocks: on this link the uncompressed cap keeps
+	// its 4K120/4K144 timings out, and a raised cap lets exactly those two in.
+	uint8_t full[384] = {};
+	if (!buildFiveTimingEdid(full)) {
+		fprintf(stderr, "FAIL: the five-timing DisplayID fixture could not be built\n");
+		return failures + 1;
+	}
+	Modes::Limits plain { 3840, 2160, 650000 };
+	Modes::Limits raised { 3840, 2160, 650000 };
+	raised.dscSink = sink;
+	raised.maxPixelClockDscKHz = 1340000;
+	Mode pm[Modes::MaxModes], rm[Modes::MaxModes];
+	const size_t pn = Modes::build(full, 384, plain, pm, Modes::MaxModes);
+	const size_t rn = Modes::build(full, 384, raised, rm, Modes::MaxModes);
+	printf("  table: %zu mode(s) uncompressed, %zu with the cap at %u kHz\n", pn, rn, raised.maxPixelClockDscKHz);
+	failures += check(rn == pn + 2, "raised cap gives %zu modes, expected %zu (the 4K120 and 4K144 timings)", rn, pn + 2);
+	for (size_t i = 0; i < pn && i < rn; i++) {
+		const Mode &a = pm[i], &b = rm[i];
+		failures += check(!b.dsc && a.id == b.id && !b.native == !a.native && a.refreshMilliHz == b.refreshMilliHz &&
+		                  Edid::sameTiming(a.t, b.t) && a.source == b.source,
+		                  "mode %zu moved when the DSC cap was raised (id %u -> %u, %ux%u, dsc %d)", i, a.id, b.id,
+		                  b.t.hActive, b.t.vActive, b.dsc ? 1 : 0);
+	}
+	// The two new entries are the compressed ones, after every uncompressed mode, marked with what the timing hook
+	// will stamp: 4K144 first (same size, higher refresh), then 4K120; 4 slices of 960 px, 2160 lines, 8 bpp.
+	if (rn == pn + 2) {
+		const Mode &a = rm[rn - 2], &b = rm[rn - 1];
+		failures += check(a.dsc && b.dsc && a.id == pn + 1 && b.id == pn + 2, "the new entries are not ids %zu..%zu",
+		                  pn + 1, pn + 2);
+		failures += check(a.t.hActive == 3840 && a.t.pixelClockKHz == 1332750 && b.t.hActive == 3840 &&
+		                  b.t.pixelClockKHz == 1188000, "the new entries are not 4K144 (1.33275 GHz) then 4K120 "
+		                  "(1.188 GHz): %u and %u kHz", a.t.pixelClockKHz, b.t.pixelClockKHz);
+		for (const Mode *m : { &a, &b })
+			failures += check(m->dscSlices == 4 && m->dscSliceWidth == 960 && m->dscSliceHeight == 2160 &&
+			                  m->dscBpp == 8 && !m->native,
+			                  "id %u: %u slices of %u x %u, %u bpp, native %d", m->id, m->dscSlices, m->dscSliceWidth,
+			                  m->dscSliceHeight, m->dscBpp, m->native ? 1 : 0);
+	}
+	// A cap between the two: only the 4K120 joins (1.188 GHz <= 1200000), 4K144 stays out.
+	{
+		Modes::Limits one = raised;
+		one.maxPixelClockDscKHz = 1200000;
+		failures += check(Modes::build(full, 384, one, rm, Modes::MaxModes) == pn + 1,
+		                  "a cap of 1200000 kHz should let exactly one timing in");
+	}
+	// The cap without the sink block is not a licence: the layout is what makes a timing offerable.
+	{
+		Modes::Limits noSink = raised;
+		noSink.dscSink = Dsc::Caps {};
+		failures += check(Modes::build(full, 384, noSink, rm, Modes::MaxModes) == pn,
+		                  "a cap with no decoded sink block added a mode");
+	}
+
+	// U1 item 4: the NDRV detailed-timing record carries no DSC field. This is the mirror plugin.cpp static_asserts
+	// against Apple's struct (NDRV_SAME_SIZE/NDRV_SAME_FIELD, IOMacOSVideo.h:1135-1186): 30 fields, the last eight dwords
+	// csNumLinks and csReserved2..8, and the whole record is the same 0xa0 bytes as IODetailedTimingInformationV2 — whose
+	// dscCompressedBitsPerPixel/dscSliceHeight (0x90/0x92) are the two halves of csReserved5 and whose dscSliceWidth
+	// (0x94) is csReserved6. So src/ndrv.cpp::getDetailedTiming has nowhere to put them, and fills none.
+	failures += check(sizeof(Ndrv::VDDetailedTimingRec) == 0xa0, "NDRV detailed timing is %zu bytes, expected 0xa0",
+	                  sizeof(Ndrv::VDDetailedTimingRec));
+	failures += check(__builtin_offsetof(Ndrv::VDDetailedTimingRec, csPixelClock) == 0x28 &&
+	                  __builtin_offsetof(Ndrv::VDDetailedTimingRec, csHorizontalActive) == 0x40 &&
+	                  __builtin_offsetof(Ndrv::VDDetailedTimingRec, csNumLinks) == 0x80,
+	                  "the NDRV detailed-timing record's offsets moved");
+	failures += check(__builtin_offsetof(Ndrv::VDDetailedTimingRec, csReserved5) == 0x90 &&
+	                  __builtin_offsetof(Ndrv::VDDetailedTimingRec, csReserved6) == 0x94 &&
+	                  __builtin_offsetof(Ndrv::VDDetailedTimingRec, csReserved8) == 0x9c,
+	                  "the reserved dwords of the NDRV record are not where the V2 dsc words land");
+
+	printf("\ndsc: the compressed-mode rule (U1: the cap and the slice choice) %s\n", failures ? "FAILED" : "ok");
+	return failures;
+}
+
 static int testModes() {
 	using Modes::Mode;
 	using Modes::Limits;
@@ -683,36 +892,8 @@ static int testModes() {
 	// The Samsung's block 2 as the card read it (2026-11-15): five Type I timings. Its modes on the 4-lane HBR2 link
 	// with DISPCLK at 650 MHz: 2560x1440@144 (604.25 MHz) and 1920x1080@144 join, 3840x2160@120 and @144 do not.
 	{
-		static const uint32_t five[5][7] = {   // kHz, h active/blank/fp/sw, v active/blank (v fp/sw below)
-			{ 1188000, 3840, 560, 176, 88, 2160, 90 }, { 1332750, 3840, 160, 48, 32, 2160, 154 },
-			{ 533250, 3840, 160, 48, 32, 2160, 62 }, { 604250, 2560, 160, 48, 32, 1440, 103 },
-			{ 346500, 1920, 160, 48, 32, 1080, 77 } };
-		static const uint32_t vsync[5][2] = { { 8, 10 }, { 3, 5 }, { 3, 5 }, { 3, 5 }, { 3, 5 } };
 		uint8_t full[384] = {};
-		memcpy(full, samsung, 256);
-		uint8_t *b2 = full + 256;
-		b2[0] = 0x70; b2[1] = 0x13; b2[2] = 3 + 5 * 20; b2[5] = 0x03; b2[7] = 5 * 20;
-		for (int i = 0; i < 5; i++) {
-			uint8_t *d = b2 + 8 + 20 * i;
-			const uint32_t f[8] = { five[i][1], five[i][2], five[i][3] | 0x8000u, five[i][4], five[i][5], five[i][6],
-			                        vsync[i][0], vsync[i][1] };
-			const uint32_t clock = five[i][0] / 10 - 1;
-			d[0] = clock & 0xff; d[1] = (clock >> 8) & 0xff; d[2] = clock >> 16;
-			for (int k = 0; k < 8; k++) {
-				const uint32_t v = f[k] - 1;   // the polarity bit survives: fp is at least 1
-				d[4 + 2 * k] = v & 0xff;
-				d[5 + 2 * k] = (v >> 8) & 0xff;
-			}
-		}
-		uint8_t sum = 0;
-		for (int i = 0; i < 127; i++)
-			sum += b2[i];
-		b2[127] = static_cast<uint8_t>(-sum);
-		full[126] = 2;   // the base block announces both extensions
-		uint8_t s0 = 0;
-		for (int i = 0; i < 127; i++)
-			s0 += full[i];
-		full[127] = static_cast<uint8_t>(-s0);
+		failures += check(buildFiveTimingEdid(full), "the five-timing DisplayID fixture could not be built");
 		Modes::Limits hbr2 { 3840, 2160, 650000 };
 		Mode dm[Modes::MaxModes];
 		const size_t dmn = Modes::build(full, 384, hbr2, dm, Modes::MaxModes);
@@ -5979,6 +6160,7 @@ int main(int argc, char **argv) {
 	failures += testDpTrain();
 	failures += testDcnInit();
 	failures += testDsc();
+	failures += testDscModes();
 	failures += testDpDual();
 	failures += testN48N();
 	failures += testPsp();

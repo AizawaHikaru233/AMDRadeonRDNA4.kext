@@ -75,6 +75,13 @@ public:
 	// plugin.cpp: the getTimingInfoForDisplayMode route is in place, so the colour fields can be written. Without it
 	// no HDR10 mode is offered: it would be an SDR duplicate of a mode macOS already has.
 	static void setTimingHookInstalled(bool on) { hdrTimingHook = on; }
+	// rdna4-dscmodes=1 (trial, U1 of docs/dsc-4k120-plan.md §7, docs/dsc-modes-u1.md): the mode table also offers the
+	// timings this link carries only compressed — above the uncompressed cap of bootDpMaxKHz() and within what the
+	// sink's own DSC block says the compressor can carry — each marked Mode::dsc and stamped with the three OS-side
+	// DSC fields by plugin.cpp's getTimingInfoForDisplayMode hook. Nothing is programmed and no timing is switched by
+	// it: a switch to one of those modes is refused (and logged) until the compressor is implemented. Off by default:
+	// with it off the table, the IDs and the timing records are exactly the ones this kext served before.
+	static bool dscModesEnabled() { return dscModes; }
 	bool        scanoutHdr { false };     // the live mode is one of those variants: the plane reads ARGB2101010
 	void setHdrOption(bool on);           // debug.rdna4_hdr: off→on appends the variants (the table only grows)
 	size_t offerHdrModes();               // append the HDR10 variants of the modes the table holds, room permitting
@@ -390,6 +397,7 @@ public:
 private:
 	static bool hdrModes;        // rdna4-hdr=1 (boot arg) or debug.rdna4_hdr=1 at run time
 	static bool hdrTimingHook;   // plugin.cpp routed IONDRVFramebuffer::getTimingInfoForDisplayMode
+	static bool dscModes;        // rdna4-dscmodes=1: the table offers the compressed-only timings
 	IOPCIDevice *pciDevice { nullptr };
 	IOService   *owner { nullptr };
 

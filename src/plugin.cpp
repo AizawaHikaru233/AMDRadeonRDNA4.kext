@@ -105,6 +105,17 @@ NDRV_SAME_FIELD(VDDetailedTimingRec, csPixelClock);
 NDRV_SAME_FIELD(VDDetailedTimingRec, csHorizontalActive);
 NDRV_SAME_FIELD(VDDetailedTimingRec, csVerticalSyncConfig);
 NDRV_SAME_FIELD(VDDetailedTimingRec, csNumLinks);
+// U1 (docs/dsc-modes-u1.md §5): the NDRV detailed-timing record has no DSC field at all. It is the same 0xa0 bytes as
+// IODetailedTimingInformationV2, and where the V2 timing carries dscCompressedBitsPerPixel/dscSliceHeight/dscSliceWidth
+// (0x90/0x92/0x94) this record has csReserved5 (0x90, both halves) and csReserved6 (0x94), which IOMacOSVideo.h
+// documents as "Init to 0". cscGetDetailedTiming can therefore carry no DSC information, and
+// src/ndrv.cpp::getDetailedTiming fills none: the words are written into the IOTimingInformation macOS asks for
+// instead (wrapGetTimingInfoForDisplayMode below).
+static_assert(sizeof(::VDDetailedTimingRec) == sizeof(::IODetailedTimingInformationV2),
+              "the NDRV and the V2 detailed-timing records are the same size");
+static_assert(__builtin_offsetof(::VDDetailedTimingRec, csReserved5) == 0x90 &&
+              __builtin_offsetof(::VDDetailedTimingRec, csReserved6) == 0x94,
+              "the V2 timing's dsc words (0x90/0x92/0x94) land on csReserved5 and csReserved6 of the NDRV record");
 static_assert(Ndrv::cscGetCurMode == ::cscGetCurMode && Ndrv::cscGetSync == ::cscGetSync &&
               Ndrv::cscGetConnection == ::cscGetConnection &&
               Ndrv::cscGetModeTiming == ::cscGetModeTiming &&
@@ -1357,6 +1368,13 @@ static_assert(__builtin_offsetof(IODetailedTimingInformationV2, colorimetry) == 
               "IODetailedTimingInformationV2.colorimetry");
 static_assert(__builtin_offsetof(IODetailedTimingInformationV2, dynamicRange) == 0x8e,
               "IODetailedTimingInformationV2.dynamicRange");
+// U1 (docs/dsc-modes-u1.md): the 2018 timing features, the three words macOS reads to know a timing is compressed.
+static_assert(__builtin_offsetof(IODetailedTimingInformationV2, dscCompressedBitsPerPixel) == 0x90,
+              "IODetailedTimingInformationV2.dscCompressedBitsPerPixel");
+static_assert(__builtin_offsetof(IODetailedTimingInformationV2, dscSliceHeight) == 0x92,
+              "IODetailedTimingInformationV2.dscSliceHeight");
+static_assert(__builtin_offsetof(IODetailedTimingInformationV2, dscSliceWidth) == 0x94,
+              "IODetailedTimingInformationV2.dscSliceWidth");
 
 IOReturn wrapGetTimingInfoForDisplayMode(void *fb, int32_t displayMode, IOTimingInformation *info) {
 	auto org = reinterpret_cast<IOReturn (*)(void *, int32_t, IOTimingInformation *)>(orgGetTimingInfoForDisplayMode);
@@ -1372,6 +1390,42 @@ IOReturn wrapGetTimingInfoForDisplayMode(void *fb, int32_t displayMode, IOTiming
 		return kIOReturnBadArgument;
 	}
 	const IOReturn r = org(fb, displayMode, info);
+
+	// U1 (docs/dsc-modes-u1.md): a timing the mode table offers only compressed carries the three DSC words of the V2
+	// record. macOS judges a timing by its uncompressed bandwidth otherwise — NVIDIA measured a 4K@120 display declared
+	// offline without them (ref/nvidia-macos-driver kexts/NVRMFB/fb/nvrm-fb.cpp:3844-3860, its issue #77). Only for our
+	// own Mode::dsc entries, only with the trial option armed (no mode is marked without it, so on a plain boot this
+	// block writes nothing at all), and only when the caller asked for a detailed timing.
+	if (r == kIOReturnSuccess && RDNA4Device::dscModesEnabled()) {
+		FbEntry *de = fbFind(fb);
+		const Modes::Mode *dm = de && de->state ? de->state->ndrv.modeForDisplayId(displayMode) : nullptr;
+		if (dm && dm->dsc) {
+			if (!(info->flags & kIODetailedTimingValid)) {
+				// IOFramebuffer::updateOnline's offline probe asks for appleTimingID only (flags = 0): the union is
+				// not a V2 there. Said once, not per mode.
+				static bool noted = false;
+				if (!noted) {
+					noted = true;
+					FBLOG("dscmodes: getTimingInfoForDisplayMode without kIODetailedTimingValid: no DSC word written "
+					      "(appleTimingID only)");
+				}
+			} else {
+				IODetailedTimingInformationV2 &v2 = info->detailedInfo.v2;
+				// bpp x 16, the 2018 timing features' encoding (NVKMS's 257 is 16.06 bpp); the slice layout is the one
+				// modes.cpp computed from the sink's caps, not a guess.
+				v2.dscCompressedBitsPerPixel = static_cast<UInt16>(dm->dscBpp) * 16u;
+				v2.dscSliceHeight = dm->dscSliceHeight;
+				v2.dscSliceWidth = dm->dscSliceWidth;
+				static uint32_t logged = 0;
+				if (__atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) < 8)
+					FBLOG("dscmodes: mode %d: dscCompressedBitsPerPixel %u (%u bpp x 16), dscSliceHeight %u, "
+					      "dscSliceWidth %u (flags 0x%x)", displayMode,
+					      static_cast<unsigned>(v2.dscCompressedBitsPerPixel),
+					      static_cast<unsigned>(dm->dscBpp), static_cast<unsigned>(v2.dscSliceHeight),
+					      static_cast<unsigned>(v2.dscSliceWidth), info->flags);
+			}
+		}
+	}
 
 	// Off by default, and a failed original is passed through untouched: the option must never turn a timing query
 	// into a boot problem.

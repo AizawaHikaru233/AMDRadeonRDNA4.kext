@@ -40,6 +40,8 @@ extern struct sysctl_oid sysctl__debug_rdna4_dsc;
 // boot's.
 bool RDNA4Device::hdrModes { false };
 bool RDNA4Device::hdrTimingHook { false };
+// rdna4-dscmodes=1 (docs/dsc-modes-u1.md): the table also offers the timings this link carries only compressed.
+bool RDNA4Device::dscModes { false };
 // The device debug.rdna4_hdr and debug.rdna4_dsc act on (set where the sysctls are registered).
 static RDNA4Device *gHdrDevice;
 static RDNA4Device *gDscDevice;
@@ -2833,6 +2835,40 @@ void RDNA4Device::buildModeTable() {
 		      bootTiming.pixelClockKHz);
 	}
 
+	// U1 (docs/dsc-modes-u1.md, rdna4-dscmodes=1): the timings this link carries only compressed. A per-mode rule, never
+	// a raise of lim.maxPixelClockKHz: a timing at or below that cap is offered exactly as before and keeps its ID, and
+	// the ones above it are offered only when the sink's own DPCD block says the compressor can carry them. The cap is
+	// computed from the block read above, the link's 8 bpc budget and the DISPCLK the kext asks the SMU for — never a
+	// constant (the plan's min(DISPCLK, slices x 340 Mpix/s, link / bpp)).
+	const uint32_t plainKHz = lim.maxPixelClockKHz;
+	uint32_t dscmodes = 0;
+	dscModes = Trial::option("rdna4-dscmodes", dscmodes) && dscmodes != 0;
+	if (dscModes) {
+		lim.dscSink = dscCaps;
+		const Modes::DscCap cap = Modes::dscCap(dscCaps, bootDpLinkKHz, dispclkTargetKHz(), Modes::kDscBpp8bpc);
+		lim.maxPixelClockDscKHz = cap.kKHz;
+		if (!dscCaps.read)
+			FBLOG("dscmodes: rdna4-dscmodes=1, but no compressed timing is offered: the sink's DSC block was not "
+			      "read (the boot display is not a DisplayPort sink, or it did not answer)");
+		else if (!dscCaps.supported)
+			FBLOG("dscmodes: rdna4-dscmodes=1, but no compressed timing is offered: the sink does not decompress "
+			      "(0x060 = 0x%02x)", dscCaps.raw[0]);
+		else if (!cap.slices)
+			FBLOG("dscmodes: rdna4-dscmodes=1, but no compressed timing is offered: the sink offers no slice count "
+			      "the encoder has (0x064 = 0x%02x, the encoder 1..%u)", dscCaps.slices1, Dsc::kEncoderSlices);
+		else if (!cap.clockKHz)
+			FBLOG("dscmodes: rdna4-dscmodes=1, but no compressed timing is offered: the DISPCLK the kext asks for "
+			      "is not known (rdna4-dispclk=0?)");
+		else if (!cap.linkKHz)
+			FBLOG("dscmodes: rdna4-dscmodes=1, but no compressed timing is offered: the link's pixel-clock budget "
+			      "is not known (no DisplayPort link on this display)");
+		else
+			FBLOG("dscmodes: rdna4-dscmodes=1: timings this link carries only compressed up to %u kHz = min(DISPCLK "
+			      "%u, %u slices x %u Mpix/s = %u, link %u kHz x 24 / %u bpp = %u); uncompressed stays at %u kHz, so "
+			      "only timings between the two can join", cap.kKHz, cap.clockKHz, cap.slices,
+			      dscCaps.throughput0Mps, cap.throughputKHz, bootDpLinkKHz, cap.bpp, cap.linkKHz, plainKHz);
+	}
+
 	// The EDID, all of it: the same bytes macOS is served.
 	if (modesetRequested && edidLen)
 		modeCount = Modes::build(edidData, edidLen, lim, modeTable, Modes::MaxModes);
@@ -2882,9 +2918,16 @@ void RDNA4Device::buildModeTable() {
 		offerHdrModes();
 	for (size_t i = 0; i < modeCount; i++) {
 		const Modes::Mode &m = modeTable[i];
-		FBLOG("modes: id %u %ux%u@%u.%03u %u kHz%s%s%s", m.id, m.t.hActive, m.t.vActive,
+		FBLOG("modes: id %u %ux%u@%u.%03u %u kHz%s%s%s%s", m.id, m.t.hActive, m.t.vActive,
 		      m.refreshMilliHz / 1000, m.refreshMilliHz % 1000, m.t.pixelClockKHz,
-		      m.native ? " native" : "", m.hdr10 ? " HDR10" : "", m.id == currentModeId ? " (live)" : "");
+		      m.native ? " native" : "", m.hdr10 ? " HDR10" : "", m.dsc ? " DSC" : "",
+		      m.id == currentModeId ? " (live)" : "");
+		// U1: what the timing hook will stamp for it, so a boot's log holds the numbers the OS was given.
+		if (m.dsc)
+			FBLOG("dscmodes: id %u %ux%u@%u.%03u is offered compressed only: %u slices of %u x %u px, %u bpp -> "
+			      "dscCompressedBitsPerPixel %u, dscSliceHeight %u, dscSliceWidth %u", m.id, m.t.hActive, m.t.vActive,
+			      m.refreshMilliHz / 1000, m.refreshMilliHz % 1000, m.dscSlices, m.dscSliceWidth, m.dscSliceHeight,
+			      m.dscBpp, static_cast<unsigned>(m.dscBpp) * 16u, m.dscSliceHeight, m.dscSliceWidth);
 	}
 	FBLOG("modes: %lu mode(s), switching %s", static_cast<unsigned long>(modeCount),
 	      modesetRequested ? "on (rdna4-modeset=0 turns it off)" : "off (rdna4-modeset=0: boot mode only)");
@@ -2905,21 +2948,30 @@ size_t RDNA4Device::offerHdrModes() {
 	if (!hdrModes || !hdrTimingHook || !modeCount)
 		return 0;
 
+	// A compressed-only timing gets no HDR10 variant: its PPS at 10 bpc would be a different bits-per-pixel (12, not
+	// 8: docs/dsc-4k120-plan.md §5.1), and the HDR and DSC tracks are deliberately independent (§0.3 of the same
+	// file). Skipped here, said once, rather than stamped with the 8 bpc layout of its SDR original.
+	size_t dscSkipped = 0;
 	const size_t base = modeCount;
 	size_t candidates = 0;
 	uint32_t nextId = 1;
 	for (size_t i = 0; i < base; i++) {
 		if (modeTable[i].id >= nextId)
 			nextId = modeTable[i].id + 1;
-		if (!modeTable[i].hdr10)
+		if (modeTable[i].dsc)
+			dscSkipped++;
+		else if (!modeTable[i].hdr10)
 			candidates++;
 	}
+	if (dscSkipped)
+		FBLOG("hdr: %lu compressed-only mode(s) get no HDR10 variant (a 10 bpc PPS is 12 bpp, not the 8 of their SDR "
+		      "original)", static_cast<unsigned long>(dscSkipped));
 	if (!candidates)
 		return 0;
 
 	size_t added = 0;
 	for (size_t i = 0; i < base && modeCount < Modes::MaxModes; i++) {
-		if (modeTable[i].hdr10)
+		if (modeTable[i].hdr10 || modeTable[i].dsc)
 			continue;
 		Modes::Mode m = modeTable[i];
 		m.id = nextId++;
@@ -4191,6 +4243,17 @@ bool RDNA4Device::applyPanelRotation() {
 	return true;
 }
 
+// U1 (docs/dsc-modes-u1.md): a compressed-only timing reaching the switch path. Nothing in this driver programs the
+// DSC encoder yet, so such a mode cannot be driven and every path here refuses it — the point of the line is the
+// question U1 asks: *does macOS ask for one at all*? One line per attempt, naming the mode and the refusal.
+static void logDscModeRefused(const Modes::Mode &m, const char *refusal) {
+	FBLOG("dscmodes: the OS asked for id %u %ux%u@%u.%03u (%u kHz, %u slices of %u x %u px, %u bpp): a compressed-only "
+	      "timing, refused (%s). The compressor is not programmed in this build: rdna4-dscmodes=1 offers the timing and "
+	      "stamps its dsc fields, the encoder is the next step", m.id, m.t.hActive, m.t.vActive, m.refreshMilliHz / 1000,
+	      m.refreshMilliHz % 1000, m.t.pixelClockKHz, m.dscSlices, m.dscSliceWidth, m.dscSliceHeight, m.dscBpp,
+	      refusal);
+}
+
 IOReturn RDNA4Device::applyModeRaw(const Modes::Mode &m) {
 	if (bootReleased) {
 		FBLOG("modes: switch to id %u refused: the boot pipe is released, its connector is a head's", m.id);
@@ -4253,6 +4316,9 @@ IOReturn RDNA4Device::applyModeRaw(const Modes::Mode &m) {
 		return static_cast<uint64_t>(a.hActive) * b.pixelClockKHz < static_cast<uint64_t>(b.hActive) * a.pixelClockKHz;
 	};
 	if (dp && !known && (!reqTimingValid || lineFaster(m.t, reqTiming))) {
+		if (m.dsc)
+			logDscModeRefused(m, "no request timing from Linux for the raster, and the plane's does not deliver its "
+			                     "lines fast enough");
 		FBLOG("modes: switch to id %u refused: no request timing from Linux for %ux%u at %u kHz, and the plane's (of "
 		      "%ux%u at %u kHz) does not deliver its lines fast enough", m.id, m.t.hActive, m.t.vActive,
 		      m.t.pixelClockKHz, reqTiming.hActive, reqTiming.vActive, reqTiming.pixelClockKHz);
@@ -4279,6 +4345,8 @@ IOReturn RDNA4Device::applyModeRaw(const Modes::Mode &m) {
 	aim(liveTiming, m.t);
 	const char *why = "";
 	if (!ModeSet::build(t, modePlan, &why)) {
+		if (m.dsc)
+			logDscModeRefused(m, why);
 		FBLOG("modes: switch to id %u refused: %s", m.id, why);
 		return kIOReturnUnsupported;
 	}
