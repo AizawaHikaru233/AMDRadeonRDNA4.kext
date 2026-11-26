@@ -54,6 +54,7 @@
 #include "../src/linuxref.hpp"
 #include "../src/trial.hpp"
 #include "../src/dcninit.hpp"
+#include "../src/dsc.hpp"
 #include "rdna4compute.h"
 
 #include <cmath>
@@ -308,6 +309,191 @@ static int testEdidParser() {
 		fprintf(stderr, "FAIL: DMUB header encode (vbios)\n");
 		failures++;
 	}
+	return failures;
+}
+
+// --- DSC: the sink's DPCD block and the recorded register table ---------------
+//
+// The DPCD bytes are the sink on this machine as device.cpp read them (docs/hw-logs/2026-11-25-dpcd-dsc.txt:8, also
+// docs/dsc-4k120-plan.md §1.1): 0x060..0x06f = 01 21 03 7f 3b 07 01 00 00 1f 0e 11 08 00 00 04. The decode must
+// agree with Linux's dc_dsc_parse_dsc_dpcd field for field, and the register table src/dsc_linux.inc must be the one
+// tools/gen/pipegen recorded (its PPS words are Linux's DSC RC arithmetic, not ours).
+static int testDsc() {
+	int failures = 0;
+	const uint8_t raw[Dsc::kDpcdCapBytes] = { 0x01, 0x21, 0x03, 0x7f, 0x3b, 0x07, 0x01, 0x00,
+	                                          0x00, 0x1f, 0x0e, 0x11, 0x08, 0x00, 0x00, 0x04 };
+	const Dsc::Caps c = Dsc::decode(raw, true, true, 0x00);
+
+	printf("\ndsc: the sink's capability block (TCL 32X3B over DisplayPort, DPCD 0x060..0x06f):\n");
+	printf("  supported=%d v=%u.%u rcblock=%uKiB rcbuf=%uB slices=%u lb=%u blkpred=%d thr=%u/%u maxslice=%u bppstep=1/%u\n",
+	       c.supported ? 1 : 0, c.major(), c.minor(), c.rcBlockKiB, c.rcBufferBytes, c.slices1, c.lineBufBpc,
+	       c.blockPred ? 1 : 0, c.throughput0Mps, c.throughput1Mps, c.maxSliceWidth, c.bppIncrementDiv);
+
+	struct { const char *name; uint32_t got, want; } checks[] = {
+		{ "read",         c.read ? 1u : 0u,     1 },
+		{ "supported",    c.supported ? 1u : 0u, 1 },
+		{ "passthrough",  c.passthrough ? 1u : 0u, 0 },
+		{ "dynamic PPS",  c.dynamicPps ? 1u : 0u, 0 },
+		{ "version",      c.version,            0x21 },     // DSC 1.2, minor << 4 | major
+		{ "major",        c.major(),            1 },
+		{ "minor",        c.minor(),            2 },
+		{ "rc block KiB", c.rcBlockKiB,         64 },       // DP_DSC_RC_BUF_BLK_SIZE_64: 64 KiB blocks
+		{ "rc buffer B",  c.rcBufferBytes,      128u * 64u * 1024u },   // 0x063 + 1 = 128 blocks
+		{ "slices1",      c.slices1,            0x3b },     // 1, 2, 4, 6, 8
+		{ "line buf bpc", c.lineBufBpc,         16 },
+		{ "block pred",   c.blockPred ? 1u : 0u, 1 },
+		{ "RGB bypass",   c.rgbConvBypass ? 1u : 0u, 0 },
+		{ "eDP max bpp",  c.edpMaxBppX16,       0 },        // not an eDP panel
+		{ "colours",      c.colorFormats,       0x1f },
+		{ "depths",       c.colorDepths,        0x0e },     // 8, 10, 12 bpc
+		{ "throughput 0", c.throughput0Mps,     340 },
+		{ "throughput 1", c.throughput1Mps,     340 },
+		{ "max slice",    c.maxSliceWidth,      2560 },     // 0x06c * 320
+		{ "slice caps 2", c.slices2,            0 },
+		{ "bpp delta",    c.bppDeltaVersion,    0 },
+		{ "bpp step div", c.bppIncrementDiv,    1 },        // integer bpp only
+		{ "enable read",  c.enableRead ? 1u : 0u, 1 },
+		{ "enable",       c.enable,             0 },        // DSC is off on the plain boot
+	};
+	for (auto &k : checks) {
+		if (k.got != k.want) {
+			fprintf(stderr, "FAIL: dsc sink %s = %u, expected %u\n", k.name, k.got, k.want);
+			failures++;
+		}
+	}
+
+	char text[48];
+	if (strcmp(Dsc::versionText(c, text, sizeof(text)), "v1.2") != 0) {
+		fprintf(stderr, "FAIL: dsc version text %s, expected v1.2\n", text);
+		failures++;
+	}
+	if (strcmp(Dsc::slicesText(c, text, sizeof(text)), "{1,2,4,6,8}") != 0) {
+		fprintf(stderr, "FAIL: dsc slices text %s, expected {1,2,4,6,8}\n", text);
+		failures++;
+	}
+	if (Dsc::usableSlices(c) != 0x0b) {                     // 1, 2 and 4 are all the encoder offers
+		fprintf(stderr, "FAIL: dsc usable slices 0x%02x, expected 0x0b\n", Dsc::usableSlices(c));
+		failures++;
+	}
+
+	// The plan's verdict: 4K120 at 8 bpp needs 4 slices of 340 Mpix/s (2 x 340 < 1066.56), and the link carries
+	// 8.53 of its 17.28 Gbps.
+	const Dsc::Need n4k = Dsc::need(c, Dsc::kFourK120KHz, 8);
+	printf("  4K120 1066.56 MHz at 8 bpp: %u slices (offered %d), %u Mbps of %u, fits %d\n", n4k.slices,
+	       n4k.slicesOffered ? 1 : 0, n4k.linkMbpsNeeded, Dsc::kLinkPayloadMbps, n4k.linkFits ? 1 : 0);
+	if (n4k.slices != 4 || !n4k.slicesOffered) {
+		fprintf(stderr, "FAIL: dsc 4K120 needs %u slices (offered %d), expected 4 and offered\n", n4k.slices,
+		        n4k.slicesOffered ? 1 : 0);
+		failures++;
+	}
+	if (!n4k.linkFits || n4k.linkMbpsNeeded != 8532) {
+		fprintf(stderr, "FAIL: dsc 4K120 8 bpp needs %u Mbps (fits %d), expected 8532 and fits\n", n4k.linkMbpsNeeded,
+		        n4k.linkFits ? 1 : 0);
+		failures++;
+	}
+	// A 2-slice raster: 2 x 340 Mpix/s covers 4K60 (533.25 MHz) and the S2 table was recorded for it.
+	const Dsc::Need n60 = Dsc::need(c, 533250, 8);
+	if (n60.slices != 2 || !n60.slicesOffered) {
+		fprintf(stderr, "FAIL: dsc 4K60 needs %u slices (offered %d), expected 2 and offered\n", n60.slices,
+		        n60.slicesOffered ? 1 : 0);
+		failures++;
+	}
+
+	// The recorded table: what tools/gen/pipegen/mkdsc.py wrote for the boot raster. Changing it means
+	// regenerating it (tools/gen/pipegen/run.sh), not editing it.
+	size_t count = 0;
+	const Dsc::Gen *gen = Dsc::gen(count);
+	printf("  recorded chain: %zu entries, %ux%u, %u slices of %u px, %u bpp, %u bpc\n", count, Dsc::picWidth(),
+	       Dsc::picHeight(), Dsc::slices(), Dsc::sliceWidth(), Dsc::bitsPerPixel(), Dsc::bitsPerComponent());
+	if (count != 96) {
+		fprintf(stderr, "FAIL: dsc table has %zu entries, expected 96\n", count);
+		failures++;
+	}
+	if (Dsc::picWidth() != 3840 || Dsc::picHeight() != 2160 || Dsc::slices() != 2 || Dsc::sliceWidth() != 1920 ||
+	    Dsc::bitsPerPixel() != 8 || Dsc::bitsPerComponent() != 8) {
+		fprintf(stderr, "FAIL: dsc table metadata is not the 4K60 / 2 x 1920 / 8 bpp PPS\n");
+		failures++;
+	}
+
+	unsigned ppsEntries = 0, auxEntries = 0, dscEntries = 0, dscRmEntries = 0, optcEntries = 0;
+	bool lastIsAux = false;
+	for (size_t i = 0; i < count; i++) {
+		if (strstr(gen[i].what, "DSCC_PPS_CONFIG"))
+			ppsEntries++;
+		if (gen[i].op == 'A') {
+			auxEntries++;
+			if (gen[i].dword != Dsc::kDpcdEnable || gen[i].value != 0x01) {
+				fprintf(stderr, "FAIL: dsc table aux entry is 0x%x = 0x%x, expected 0x160 = 1\n", gen[i].dword, gen[i].value);
+				failures++;
+			}
+			lastIsAux = i + 1 == count;
+		}
+		if (gen[i].block == Dsc::kDsc)
+			dscEntries++;
+		if (gen[i].block == Dsc::kDscRm)
+			dscRmEntries++;
+		if (gen[i].block == Dsc::kOptc)
+			optcEntries++;
+	}
+	if (ppsEntries != 23) {
+		fprintf(stderr, "FAIL: dsc table has %u PPS word entries, expected 23\n", ppsEntries);
+		failures++;
+	}
+	if (auxEntries != 1 || !lastIsAux) {
+		fprintf(stderr, "FAIL: dsc table has %u aux entries (last %d), expected one and last\n", auxEntries, lastIsAux ? 1 : 0);
+		failures++;
+	}
+	if (dscEntries != 29 || dscRmEntries != 1 || optcEntries != 3) {
+		fprintf(stderr, "FAIL: dsc table blocks DSC %u, DSCRM %u, OPTC %u; expected 29, 1, 3\n", dscEntries,
+		        dscRmEntries, optcEntries);
+		failures++;
+	}
+
+	// The 23 PPS words are Linux's RC arithmetic for this PPS; these are the recorded values (mkdsc.py refuses a
+	// table that does not have 23 of them).
+	const uint32_t *pps = Dsc::ppsWords();
+	const uint32_t wantPps[23] = {
+		0x8d000002, 0x07803080, 0x08700f00, 0x08700780, 0x00000200, 0x04cf0020, 0x000f001a, 0x0004000f,
+		0x00000000, 0x10f01800, 0x20000c03, 0x330b0b06, 0x382a1c0e, 0x69625446, 0x7b797770, 0x08807e7d,
+		0x00a10080, 0xf0e3f8c1, 0xe0e3e8e3, 0xe123e103, 0xd945d944, 0xd165d965, 0xd1acd188 };
+	for (size_t i = 0; i < 23; i++) {
+		if (pps[i] != wantPps[i]) {
+			fprintf(stderr, "FAIL: dsc PPS word %zu = 0x%08x, expected 0x%08x\n", i, pps[i], wantPps[i]);
+			failures++;
+		}
+	}
+	// The PPS says what the table metadata says: DSC 1.2, line buffer 13, 8 bpc, 8 bpp, 3840x2160, 2 x 1920.
+	if ((pps[0] & 0xf) != 2 || ((pps[0] >> 24) & 0xf) != 0xd || ((pps[0] >> 28) & 0xf) != 8) {
+		fprintf(stderr, "FAIL: dsc PPS0 0x%08x is not version 1.2 / 8 bpc / line buffer 13\n", pps[0]);
+		failures++;
+	}
+	if ((pps[1] & 0xff) != 0x80) {                           // bits_per_pixel = 8 * 16 = 128
+		fprintf(stderr, "FAIL: dsc PPS1 0x%08x does not say 128 (8 bpp x 16)\n", pps[1]);
+		failures++;
+	}
+	if ((pps[2] & 0xffff) != 3840 || ((pps[2] >> 16) & 0xffff) != 2160) {   // pic_width, pic_height
+		fprintf(stderr, "FAIL: dsc PPS2 0x%08x is not 3840x2160\n", pps[2]);
+		failures++;
+	}
+	if ((pps[3] & 0xffff) != 1920 || ((pps[3] >> 16) & 0xffff) != 2160) {   // slice_width, slice_height
+		fprintf(stderr, "FAIL: dsc PPS3 0x%08x is not 1920x2160\n", pps[3]);
+		failures++;
+	}
+
+	// Instance strides: the driver must be able to aim the recorded instance-0 addresses at another pipe's blocks.
+	const Dsc::Gen dscStep { 'W', Dsc::kDsc, 2, 0x000d, 0xffffffff, 0, 0, "test" };
+	const Dsc::Gen rmStep  { 'W', Dsc::kDscRm, 2, 0x0000, 0xffffffff, 0, 0, "test" };
+	const Dsc::Gen optcStep{ 'W', Dsc::kOptc, 2, 0x0001, 0xffffffff, 0, 0, "test" };
+	const Dsc::Gen digStep { 'W', Dsc::kDig, 2, 0x211f, 0xffffffff, 0, 0, "test" };
+	const Dsc::Gen fixStep { 'W', Dsc::kFixed, 2, 0x006c, 0xffffffff, 0, 0, "test" };
+	if (Dsc::address(dscStep, 2, 0, 0) != 0x0d + 0x5c * 2 || Dsc::address(rmStep, 3, 0, 0) != 3 ||
+	    Dsc::address(optcStep, 0, 2, 0) != 0x21 || Dsc::address(digStep, 0, 0, 0x124 * 3) != 0x211f + 0x124 * 3 ||
+	    Dsc::address(fixStep, 2, 2, 0x124) != 0x006c) {
+		fprintf(stderr, "FAIL: dsc instance strides are wrong\n");
+		failures++;
+	}
+
+	printf("\ndsc: the sink's DSC block and the recorded DSC chain %s\n", failures ? "FAILED" : "ok");
 	return failures;
 }
 
@@ -5792,6 +5978,7 @@ int main(int argc, char **argv) {
 	failures += testPipe2();
 	failures += testDpTrain();
 	failures += testDcnInit();
+	failures += testDsc();
 	failures += testDpDual();
 	failures += testN48N();
 	failures += testPsp();

@@ -75,6 +75,7 @@ cc() { # source, object: compile if the object is older
 }
 cc "$here/pipegen.c" "$B/obj/pipegen.o"
 cc "$here/rec.c" "$B/obj/rec.o"
+cc "$here/shim/dsc_pps_pack.c" "$B/obj/dsc_pps_pack.o"
 while read -r f; do cc "$D/$f" "$B/obj/L_$(echo "$f" | tr / _ | sed 's/\.c$/.o/')"; done < "$here/linux-sources.txt"
 for f in $(find "$M/src" -name '*.c' ! -name dml2_top_legacy.c | sort); do cc "$f" "$B/obj/M_$(basename "$f" .c).o"; done
 
@@ -187,6 +188,14 @@ if [ $# -eq 0 ]; then
 else
 	table pipe2_linux.inc "$@"
 fi
+
+# The DSC table src/dsc_linux.inc: the boot DisplayPort pipe's 4K60 raster with Linux's own DSC chain on, 2 slices
+# of 1920 px at 8 bpp (the smallest step that proves the compressor; docs/dsc-s2.md). mkdsc.py refuses a trace whose
+# chain is not all there or whose PPS has not 23 words.
+"$B/pipegen" dsc 2 8 dplink a 0 0 0 0 0 1  3840 48 32 80  2160 3 5 54  533250 1 0 0 > "$B/dsc-trace.txt"
+python3 "$here/mkdsc.py" "$HDR" "$B/dsc-trace.txt" "$(git -C "$L" rev-parse HEAD)" > "$B/dsc_linux.inc"
+cp -f "$B/dsc_linux.inc" "$repo/src/dsc_linux.inc"
+echo "wrote src/dsc_linux.inc"
 
 # The reference for the host test of the DisplayPort mode switch (src/modeset.cpp): the same Linux code
 # retiming a lit DP stream on pipe 0 to 2560x1440@60 (CVT reduced blanking).

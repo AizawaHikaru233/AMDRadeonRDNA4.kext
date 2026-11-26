@@ -22,6 +22,8 @@
 extern struct sysctl_oid sysctl__debug_rdna4_rot180;
 // debug.rdna4_hdr's oid (its SYSCTL_PROC is at the HDR section further down; init registers it with rot180's)
 extern struct sysctl_oid sysctl__debug_rdna4_hdr;
+// debug.rdna4_dsc's oid (its SYSCTL_PROC is at the DSC section further down; init registers it with the others)
+extern struct sysctl_oid sysctl__debug_rdna4_dsc;
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOMessage.h>
@@ -38,8 +40,9 @@ extern struct sysctl_oid sysctl__debug_rdna4_hdr;
 // boot's.
 bool RDNA4Device::hdrModes { false };
 bool RDNA4Device::hdrTimingHook { false };
-// The device debug.rdna4_hdr acts on (set where the sysctl is registered).
+// The device debug.rdna4_hdr and debug.rdna4_dsc act on (set where the sysctls are registered).
 static RDNA4Device *gHdrDevice;
+static RDNA4Device *gDscDevice;
 
 // ---------------------------------------------------------------------------
 // Console framebuffer discovery
@@ -2672,8 +2675,26 @@ bool RDNA4Device::init(IOPCIDevice *pci, IOService *ownerService) {
 	if (PE_parse_boot_argn("rdna4-dptrain", &dpTrainLevel, sizeof(dpTrainLevel)) && dpTrainLevel)
 		noteBootDpLink();
 
+	// S0 (docs/dsc-s2.md): read and decode the sink's DSC block once a boot, whatever the options. Log only,
+	// except for one case: a sink left with DP_DSC_ENABLE = 1 by a previous DSC boot would decode a stream that is
+	// now uncompressed. The plain path is always the boot's default, so that bit is cleared here (read back).
+	if (pipe.valid() && pipe.signal == Pipe::Signal::DpSst && sinkAuxValid) {
+		readSinkDsc();
+		if (dscCaps.enableRead && (dscCaps.enable & 0x01)) {
+			uint8_t zero = 0x00, back = 0xff;
+			const bool ok = dpcdWrite(sinkAuxInst, Dsc::kDpcdEnable, &zero, 1) &&
+			                dpcdRead(sinkAuxInst, Dsc::kDpcdEnable, &back, 1);
+			FBLOG("dsc: the sink was left with DP_DSC_ENABLE = 0x%02x (an earlier DSC boot): written 0, read back "
+			      "0x%02x (%s)", dscCaps.enable, back, ok && !(back & 0x01) ? "cleared" : "NOT cleared");
+		}
+	}
+
 	// Needs the boot timing (discoverPipe) and the sink's EDID (probeEDID).
 	buildModeTable();
+
+	// rdna4-dsc=1: the compressor on at the raster the firmware lit (docs/dsc-s2.md). Off by default; a failed
+	// boot loses the trial option (src/trial.cpp), and debug.rdna4_dsc = 0 undoes it at run time.
+	tryEnableDsc();
 
 	// rdna4-coldboot=1: what the GOP left read while it is there, then the card reset (coldReset).
 	uint32_t coldArg = 0;
@@ -2687,9 +2708,11 @@ bool RDNA4Device::init(IOPCIDevice *pci, IOService *ownerService) {
 	if (!gSleepTestDev && rmmio) {
 		gSleepTestDev = this;
 		gHdrDevice = this;
+		gDscDevice = this;
 		sysctl_register_oid(&sysctl__debug_rdna4_head2sleep);
 		sysctl_register_oid(&sysctl__debug_rdna4_rot180);
 		sysctl_register_oid(&sysctl__debug_rdna4_hdr);
+		sysctl_register_oid(&sysctl__debug_rdna4_dsc);
 	}
 	if (systemSleepWanted() && !sleepWakeNotifier) {
 		if (rmmio && pipe.valid() && !coldBoot)   // what a cold start after the wake compares against
@@ -3139,17 +3162,10 @@ bool RDNA4Device::readBootDpLink(DpTrain::Sink &sink, DpTrain::Link &link) {
 		FBLOG("dptrain: the sink's DPCD did not answer on AUX%u", sinkAuxInst);
 		return false;
 	}
-	// DSC: the capability registers live at 0x00060..0x0006b (DP 1.4). Read them with the rest: a 4K mode above
-	// the link's own 8 bpc budget can only be offered if the sink answers here.
-	uint8_t dsc[16] {};
-	const bool dscRead = dpcdRead(sinkAuxInst, 0x060, dsc, sizeof(dsc));
-	if (dscRead)
-		FBLOG("dptrain: sink DSC 0x060..0x06f: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x (%s)",
-		      dsc[0], dsc[1], dsc[2], dsc[3], dsc[4], dsc[5], dsc[6], dsc[7], dsc[8], dsc[9], dsc[10], dsc[11],
-		      dsc[12], dsc[13], dsc[14], dsc[15],
-		      (dsc[0] & 1) ? "DSC supported" : "no DSC in 0x060");
-	else
-		FBLOG("dptrain: sink DSC caps at 0x060 did not read on AUX%u", sinkAuxInst);
+	// DSC: the capability registers live at 0x00060..0x0006f (DP 1.4) and 0x160 says whether the sink is
+	// decompressing now. Read and decode them with the rest: a mode above the link's 8 bpc budget can only be
+	// offered if the sink answers here (docs/dsc-4k120-plan.md §1.1).
+	readSinkDsc();
 	const bool parsed = DpTrain::parseCaps(caps, sizeof(caps), sink);
 	link = DpTrain::Link { static_cast<uint8_t>(set[1] & 0x1f), set[0] };
 	FBLOG("dptrain: sink DPCD %u.%u, up to %u lane(s) at rate 0x%02x%s%s, reading interval 0x%02x; the firmware's "
@@ -3163,6 +3179,393 @@ bool RDNA4Device::readBootDpLink(DpTrain::Sink &sink, DpTrain::Link &link) {
 	if (!known)
 		FBLOG("dptrain: that is not a link this sink says it has: it will not be retrained");
 	return known;
+}
+
+// ---------------------------------------------------------------------------
+// DSC (Display Stream Compression): the sink's capability block and the one
+// step this driver makes — the compressor on at the boot raster
+// ---------------------------------------------------------------------------
+
+// Read DPCD 0x060..0x06f and 0x160, decode them as Linux's dc_dsc_parse_dsc_dpcd does, and log the books. False
+// when the boot display is not a DisplayPort sink with an AUX channel, or the block does not answer.
+bool RDNA4Device::readSinkDsc() {
+	dscCaps = Dsc::Caps {};
+
+	if (!pipe.valid() || pipe.signal != Pipe::Signal::DpSst || !sinkAuxValid) {
+		FBLOG("dsc: the boot display is not DisplayPort with an AUX channel: the sink's DSC block is not read");
+		return false;
+	}
+
+	uint8_t caps[Dsc::kDpcdCapBytes] {}, enable = 0;
+	const bool blockRead = dpcdRead(sinkAuxInst, Dsc::kDpcdSupport, caps, sizeof(caps));
+	const bool enableRead = dpcdRead(sinkAuxInst, Dsc::kDpcdEnable, &enable, 1);
+
+	dscCaps = Dsc::decode(caps, blockRead, enableRead, enable);
+	if (!blockRead) {
+		FBLOG("dsc: the sink's DSC block at DPCD 0x060 did not read on AUX%u", sinkAuxInst);
+		return false;
+	}
+	if (!dscCapsLogged) {
+		dscCapsLogged = true;
+		logSinkDsc("sink");
+	}
+	return true;
+}
+
+// One line per thing a later step keys off: the raw block, the decoded capabilities with the 4K120 verdict, and the
+// fields that decided the slice/bpp choice. Every number is an integer; no string argument is a number.
+void RDNA4Device::logSinkDsc(const char *when) {
+	const Dsc::Caps &c = dscCaps;
+	char version[16], slices[40];
+
+	FBLOG("dsc: %s DPCD 0x060..0x06f (AUX%u): %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x "
+	      "%02x %02x", when, sinkAuxInst, c.raw[0], c.raw[1], c.raw[2], c.raw[3], c.raw[4], c.raw[5], c.raw[6],
+	      c.raw[7], c.raw[8], c.raw[9], c.raw[10], c.raw[11], c.raw[12], c.raw[13], c.raw[14], c.raw[15]);
+	if (!c.read) {
+		FBLOG("dsc: %s caps: the block did not answer", when);
+		return;
+	}
+
+	const Dsc::Need fourK = Dsc::need(c, Dsc::kFourK120KHz, 8);
+	const uint32_t most = (Dsc::usableSlices(c) & 0x08) ? 4u : (Dsc::usableSlices(c) & 0x02) ? 2u
+	                                                       : (Dsc::usableSlices(c) & 0x01) ? 1u : 0u;
+	FBLOG("dsc: sink caps: %s, slices %s, max slice %u, lb %u bpc, blkpred %u, throughput %u/%u Mpix/s a slice, "
+	      "bpp step 1/%u, 0x160 0x%02x; 4K120 needs %u slices (the encoder and sink offer %u), 8 bpp = %u.%02u of "
+	      "%u Gbps", Dsc::versionText(c, version, sizeof(version)), Dsc::slicesText(c, slices, sizeof(slices)),
+	      c.maxSliceWidth, c.lineBufBpc, c.blockPred ? 1u : 0u, c.throughput0Mps, c.throughput1Mps,
+	      c.bppIncrementDiv, c.enable, fourK.slices, most, fourK.linkMbpsNeeded / 1000,
+	      (fourK.linkMbpsNeeded % 1000) / 10, Dsc::kLinkPayloadMbps / 1000);
+	FBLOG("dsc: sink detail: decomp %u pass-through %u dynamic PPS %u; rc buffer %u KiB blocks x %u = %u B; "
+	      "block pred %u, RGB-conv bypass %u; colours 0x%02x (RGB %u 444 %u 422s %u 422n %u 420n %u); depths "
+	      "0x%02x (8 %u 10 %u 12 %u); throughput mode0 %u mode1 %u; 16/20/24-slice 0x%02x; bpp delta 0x%02x",
+	      c.supported ? 1u : 0u, c.passthrough ? 1u : 0u, c.dynamicPps ? 1u : 0u, c.rcBlockKiB,
+	      c.rcBlockKiB ? static_cast<unsigned>(c.raw[0x063]) + 1 : 0u, c.rcBufferBytes, c.blockPred ? 1u : 0u,
+	      c.rgbConvBypass ? 1u : 0u, c.colorFormats, (c.colorFormats & 0x01) ? 1u : 0u, (c.colorFormats & 0x02) ? 1u : 0u,
+	      (c.colorFormats & 0x04) ? 1u : 0u, (c.colorFormats & 0x08) ? 1u : 0u, (c.colorFormats & 0x10) ? 1u : 0u,
+	      c.colorDepths, (c.colorDepths & 0x02) ? 1u : 0u, (c.colorDepths & 0x04) ? 1u : 0u,
+	      (c.colorDepths & 0x08) ? 1u : 0u, c.throughput0Mps, c.throughput1Mps, c.slices2, c.bppDeltaVersion);
+}
+
+// rdna4-dsc=1: turn the compressor on at the raster the firmware lit (3840x2160@60), with the PPS Linux's own
+// DCN 4.01 code recorded for it. The stream is stopped first, the sink is told last, and every read-back is checked
+// before the stream is started again: an unexpected value undoes the whole block and leaves the plain 8 bpc stream.
+bool RDNA4Device::tryEnableDsc() {
+	uint32_t on = 0;
+
+	if (!Trial::option("rdna4-dsc", on) || !on)
+		return false;
+
+	dscEnabled = false;
+	dscDpPixelFormatBefore = 0xffffffff;
+	dscStreamCntlBefore = 0xffffffff;
+
+	if (!rmmio || !ipDiscovery.isValid() || !pipe.valid() || pipe.signal != Pipe::Signal::DpSst) {
+		FBLOG("dsc: not enabled: no DisplayPort pipe with MMIO and discovery");
+		return false;
+	}
+	if (!readSinkDsc())
+		return false;
+
+	const Dsc::Caps &c = dscCaps;
+	if (!c.supported) {
+		FBLOG("dsc: not enabled: the sink does not decompress (0x060 = 0x%02x)", c.raw[0]);
+		return false;
+	}
+	if (c.major() != 1 || c.minor() != 2) {
+		FBLOG("dsc: not enabled: the sink reports DSC %u.%u, the encoder and this PPS are 1.2", c.major(), c.minor());
+		return false;
+	}
+	if (!(c.slices1 & 0x02)) {
+		FBLOG("dsc: not enabled: the sink does not offer 2 slices per line (0x064 = 0x%02x)", c.slices1);
+		return false;
+	}
+	if (c.maxSliceWidth < Dsc::sliceWidth()) {
+		FBLOG("dsc: not enabled: the sink's max slice is %u px, the PPS needs %u", c.maxSliceWidth, Dsc::sliceWidth());
+		return false;
+	}
+	if (c.lineBufBpc < Dsc::kEncoderLineBuf) {
+		FBLOG("dsc: not enabled: the sink's line buffer is %u bpc, the encoder's is %u", c.lineBufBpc, Dsc::kEncoderLineBuf);
+		return false;
+	}
+	if (!(c.colorFormats & 0x01) || !(c.colorDepths & 0x02)) {
+		FBLOG("dsc: not enabled: the sink's RGB %u / 8 bpc %u caps do not cover this PPS", (c.colorFormats & 0x01) ? 1u : 0u,
+		      (c.colorDepths & 0x02) ? 1u : 0u);
+		return false;
+	}
+	if (c.bppIncrementDiv != 1) {
+		FBLOG("dsc: not enabled: the sink takes bpp steps of 1/%u, this PPS is 8 bpp whole", c.bppIncrementDiv);
+		return false;
+	}
+	if (!c.blockPred) {
+		FBLOG("dsc: not enabled: the sink has no block prediction, the PPS asks for it");
+		return false;
+	}
+	if (static_cast<uint64_t>(2) * c.throughput0Mps * 1000 < liveTiming.pixelClockKHz) {
+		FBLOG("dsc: not enabled: 2 slices of %u Mpix/s cannot carry the %u kHz raster", c.throughput0Mps,
+		      liveTiming.pixelClockKHz);
+		return false;
+	}
+	if (!liveTimingValid || liveTiming.hActive != Dsc::picWidth() || liveTiming.vActive != Dsc::picHeight() ||
+	    liveTiming.pixelClockKHz + 1000 < 533250 || liveTiming.pixelClockKHz > 534250) {
+		FBLOG("dsc: not enabled: the live raster is %ux%u at %u kHz, the recorded PPS is %ux%u at 533250 kHz",
+		      liveTiming.hActive, liveTiming.vActive, liveTiming.pixelClockKHz, Dsc::picWidth(), Dsc::picHeight());
+		return false;
+	}
+	// The table was recorded on the boot pipe. Its instance offsets are applied with this pipe's OPP/DIG, but the
+	// OTG write it contains is OTG0's: only run it where the boot display really is pipe 0.
+	if (pipe.otg != 0 || pipe.opp != 0 || pipe.dig != 0 || pipe.hpd != 1) {
+		FBLOG("dsc: not enabled: the table is for the boot pipe (OTG0 OPP0 DIG0 HPD1); the lit pipe is OTG%u OPP%u "
+		      "DIG%u HPD%u", pipe.otg, pipe.opp, pipe.dig, pipe.hpd);
+		return false;
+	}
+	if (c.enableRead && (c.enable & 0x01)) {
+		FBLOG("dsc: not enabled: the sink already has 0x160 = 0x%02x", c.enable);
+		return false;
+	}
+
+	const uint8_t dscInst = pipe.opp;    // the compressor of the pipe's OPP (the plan's U8)
+	const uint8_t oppInst = pipe.opp;
+	const uint32_t dig = digOff();
+	const uint32_t dscTop = 0x3000 + Dsc::kDscStride * dscInst;
+	const uint32_t dsccStatus = 0x300d + Dsc::kDscStride * dscInst;
+	const uint32_t dscRm = 0x1a64 + Dsc::kDscRmStride * dscInst;
+	const uint32_t optcFormat = 0x1acc + Dsc::kOptcStride * oppInst;
+	const uint32_t dpPixelFormat = 0x211f + dig;
+	const uint32_t dpStreamCntl = 0x2122 + dig;
+
+	const uint32_t pfBefore = regReadDmu(2, dpPixelFormat), streamBefore = regReadDmu(2, dpStreamCntl);
+	if (pfBefore == 0xffffffff || streamBefore == 0xffffffff) {
+		FBLOG("dsc: not enabled: DP_PIXEL_FORMAT 0x%08x or DP_VID_STREAM_CNTL 0x%08x is unreadable", pfBefore, streamBefore);
+		return false;
+	}
+	dscDpPixelFormatBefore = pfBefore;
+	dscStreamCntlBefore = streamBefore;
+
+	ensureUpdateLatch();
+
+	// 1. Stop the stream. Only the enable bit is touched; the timing generator keeps running.
+	if (!regWriteDmu(2, dpStreamCntl, streamBefore & ~0x01u)) {
+		FBLOG("dsc: not enabled: the stream register did not take the stop");
+		return false;
+	}
+	bool stopped = false;
+	for (uint32_t i = 0; i < 100 && !stopped; i++) {
+		if (!(regReadDmu(2, dpStreamCntl) & 0x00010000u))
+			stopped = true;
+		else
+			IODelay(100);
+	}
+	if (!stopped) {
+		FBLOG("dsc: not enabled: the DP stream did not stop (0x%08x)", regReadDmu(2, dpStreamCntl));
+		(void)regWriteDmu(2, dpStreamCntl, (streamBefore & ~0x300u) | 0x01u);
+		return false;
+	}
+
+	// 2. Linux's DSC chain, in its order: PPS SDP, DSCCLK DTO, DSC block, forward enable, OPTC. The table's DPCD
+	//    write ('A') is the last entry and is done by hand below, after the read-backs.
+	size_t count = 0;
+	const Dsc::Gen *table = Dsc::gen(count);
+	const char *failed = nullptr;
+	uint32_t failAddr = 0, failRead = 0;
+
+	for (size_t i = 0; i < count && !failed; i++) {
+		const Dsc::Gen &g = table[i];
+		const uint32_t addr = Dsc::address(g, dscInst, oppInst, dig);
+		bool ok = true;
+
+		switch (g.op) {
+		case 'W':
+			ok = regWriteDmu(g.seg, addr, g.value);
+			break;
+		case 'U': {
+			const uint32_t was = regReadDmu(g.seg, addr);
+			ok = was != 0xffffffff && regWriteDmu(g.seg, addr, (was & ~g.mask) | (g.value & g.mask));
+			break;
+		}
+		case 'T': {
+			ok = false;
+			for (uint32_t us = 0;; us += 100) {
+				if ((regReadDmu(g.seg, addr) & g.mask) == g.value) {
+					ok = true;
+					break;
+				}
+				if (us >= g.arg)
+					break;
+				IODelay(100);
+			}
+			break;
+		}
+		case 'D':
+			IODelay(g.arg);
+			break;
+		case 'A':
+			continue;   // the sink, below, once the encoder says it is forwarding
+		default:
+			FBLOG("dsc: not enabled: table step %lu has an operation this code does not know (%u)",
+			      static_cast<unsigned long>(i), static_cast<unsigned>(g.op));
+			ok = false;
+			break;
+		}
+		if (!ok) {
+			failed = "a register step failed";
+			failAddr = addr;
+			failRead = regReadDmu(g.seg, addr);
+		}
+	}
+
+	if (!failed) {
+		// 3. The PPS latched: DSCC_DOUBLE_BUFFER_REG_UPDATE_PENDING must clear at a frame boundary.
+		bool latched = false;
+		uint32_t statusWas = 0xffffffff;
+		for (uint32_t i = 0; i < 1000; i++) {
+			statusWas = regReadDmu(2, dsccStatus);
+			if (statusWas != 0xffffffff && !(statusWas & 0x01)) {
+				latched = true;
+				break;
+			}
+			IODelay(100);
+		}
+		FBLOG("dsc: DSCC_STATUS 0x%08x (pending %s)", statusWas, latched ? "clear" : "still set after 100 ms");
+		if (!latched) {
+			failed = "DSCC_STATUS did not latch the PPS";
+			failAddr = dsccStatus;
+			failRead = statusWas;
+		}
+	}
+
+	// 4. The encoder must be forwarding to this pipe's OPP before the sink is told to decode.
+	if (!failed) {
+		const uint32_t rm = regReadDmu(2, dscRm);
+		if (rm == 0xffffffff || !(rm & 0x00000001u) || !(rm & 0x00001000u)) {
+			failed = "DSCRM is not forwarding (DSC_FORWARD_EN_STATUS)";
+			failAddr = dscRm;
+			failRead = rm;
+		} else {
+			FBLOG("dsc: DSCRM_DSC_FORWARD_CONFIG 0x%08x: forward en %u, en status %u, opp %u", rm, rm & 0x01u,
+			      (rm >> 12) & 0x01u, (rm >> 4) & 0x07u);
+		}
+	}
+
+	// 5. The sink last, with its read-back; only then is the stream started again.
+	uint8_t enableRead = 0xff;
+	bool sinkOn = false;
+	if (!failed) {
+		const uint8_t one = 0x01;
+		sinkOn = dpcdWrite(sinkAuxInst, Dsc::kDpcdEnable, &one, 1) &&
+		         dpcdRead(sinkAuxInst, Dsc::kDpcdEnable, &enableRead, 1) && (enableRead & 0x01);
+		FBLOG("dsc: DPCD 0x160 wrote 1, read back 0x%02x (%s)", enableRead, sinkOn ? "DSC on" : "not on");
+		if (!sinkOn)
+			failed = "the sink did not take DP_DSC_ENABLE";
+	}
+
+	if (failed) {
+		FBLOG("dsc: FAILED (%s) at 0x%04x, read 0x%08x: undoing the block", failed, failAddr, failRead);
+		disableDsc(failed);
+		return false;
+	}
+
+	// 6. Unblank, and check the stream is running.
+	uint32_t after = (streamBefore & ~0x00000300u) | 0x00000001u | (2u << 8);
+	if (!regWriteDmu(2, dpStreamCntl, after)) {
+		FBLOG("dsc: FAILED: the stream register did not take the start: undoing the block");
+		disableDsc("stream start failed");
+		return false;
+	}
+	bool running = false;
+	for (uint32_t i = 0; i < 100 && !running; i++) {
+		if (regReadDmu(2, dpStreamCntl) & 0x00010000u)
+			running = true;
+		else
+			IODelay(100);
+	}
+
+	dscEnabled = true;
+	if (owner)
+		owner->setProperty("AMDRadeonRDNA4,Dsc", static_cast<uint64_t>(1), 32);
+	FBLOG("dsc: ON at the %ux%u raster: 2 slices of %u px, 8 bpp, RGB 8 bpc; stream %s (0x%08x); sink 0x160 = 0x%02x",
+	      Dsc::picWidth(), Dsc::picHeight(), Dsc::sliceWidth(), running ? "running" : "NOT confirmed",
+	      regReadDmu(2, dpStreamCntl), enableRead);
+	FBLOG("dsc: DSC_TOP_CONTROL 0x%08x, DSCC_CONFIG0 0x%08x, DSCC_CONFIG1 0x%08x, DSCCIF_CONFIG0 0x%08x",
+	      regReadDmu(2, dscTop), regReadDmu(2, 0x300a + Dsc::kDscStride * dscInst),
+	      regReadDmu(2, 0x300b + Dsc::kDscStride * dscInst), regReadDmu(2, 0x3005 + Dsc::kDscStride * dscInst));
+	FBLOG("dsc: OPTC_DATA_FORMAT_CONTROL 0x%08x, OPTC_BYTES_PER_PIXEL 0x%08x, OPTC_WIDTH_CONTROL 0x%08x, "
+	      "DP_PIXEL_FORMAT 0x%08x", regReadDmu(2, optcFormat), regReadDmu(2, optcFormat + 1),
+	      regReadDmu(2, optcFormat + 2), regReadDmu(2, dpPixelFormat));
+	{
+		const uint32_t *pps = Dsc::ppsWords();
+		FBLOG("dsc: PPS 0..11: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
+		      pps[0], pps[1], pps[2], pps[3], pps[4], pps[5], pps[6], pps[7], pps[8], pps[9], pps[10], pps[11]);
+		FBLOG("dsc: PPS 12..22: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
+		      pps[12], pps[13], pps[14], pps[15], pps[16], pps[17], pps[18], pps[19], pps[20], pps[21], pps[22]);
+	}
+	return true;
+}
+
+// Undo: sink off, PPS SDP off, forward enable off, compressor clock off, OPTC back to passthrough, the stream
+// register and DP_PIXEL_FORMAT as they were, then the stream on again. Used by a failed enable and by
+// debug.rdna4_dsc = 0.
+bool RDNA4Device::disableDsc(const char *why) {
+	if (!rmmio || !ipDiscovery.isValid() || !pipe.valid())
+		return false;
+
+	const uint8_t dscInst = pipe.opp;
+	const uint8_t oppInst = pipe.opp;
+	const uint32_t dig = digOff();
+	const uint32_t dscTop = 0x3000 + Dsc::kDscStride * dscInst;
+	const uint32_t dscRm = 0x1a64 + Dsc::kDscRmStride * dscInst;
+	const uint32_t optcFormat = 0x1acc + Dsc::kOptcStride * oppInst;
+	const uint32_t dpPixelFormat = 0x211f + dig;
+	const uint32_t dpStreamCntl = 0x2122 + dig;
+
+	const uint32_t stream = regReadDmu(2, dpStreamCntl);
+	if (stream != 0xffffffff)
+		(void)regWriteDmu(2, dpStreamCntl, stream & ~0x01u);
+
+	uint8_t zero = 0x00, back = 0xff;
+	bool acked = false;
+	if (sinkAuxValid) {
+		acked = dpcdWrite(sinkAuxInst, Dsc::kDpcdEnable, &zero, 1) &&
+		        dpcdRead(sinkAuxInst, Dsc::kDpcdEnable, &back, 1);
+	}
+
+	// The encoder goes off whether or not the sink acknowledged: the stream is stopped above, and leaving the
+	// compressor forwarding a PPS the sink may not have taken is the half-enabled state this code must not leave.
+	uint32_t rm = regReadDmu(2, dscRm);
+	if (rm != 0xffffffff)
+		(void)regWriteDmu(2, dscRm, rm & ~0x00000001u);
+	uint32_t top = regReadDmu(2, dscTop);
+	if (top != 0xffffffff)
+		(void)regWriteDmu(2, dscTop, top & ~0x00000001u);
+
+	uint32_t fmt = regReadDmu(2, optcFormat);
+	if (fmt != 0xffffffff)
+		(void)regWriteDmu(2, optcFormat, fmt & ~0x00000030u);
+
+	// The PPS SDP the encoder was sending is Linux's to stop as well (enc3_dp_set_dsc_pps_info_packet(disable)).
+	const uint32_t sec2 = regReadDmu(2, 0x2169 + dig);
+	if (sec2 != 0xffffffff)
+		(void)regWriteDmu(2, 0x2169 + dig, sec2 & ~0x10000000u);
+	const uint32_t gsp = regReadDmu(2, 0x2177 + dig);
+	if (gsp != 0xffffffff)
+		(void)regWriteDmu(2, 0x2177 + dig, gsp & ~0x00000010u);
+	const uint32_t sec = regReadDmu(2, 0x2141 + dig);
+	if (sec != 0xffffffff)
+		(void)regWriteDmu(2, 0x2141 + dig, sec & ~0x00000001u);
+
+	if (dscDpPixelFormatBefore != 0xffffffff)
+		(void)regWriteDmu(2, dpPixelFormat, dscDpPixelFormatBefore);
+
+	const uint32_t now = regReadDmu(2, dpStreamCntl);
+	if (now != 0xffffffff)
+		(void)regWriteDmu(2, dpStreamCntl, (now & ~0x00000300u) | 0x00000001u | (2u << 8));
+
+	dscEnabled = false;
+	if (owner)
+		owner->setProperty("AMDRadeonRDNA4,Dsc", static_cast<uint64_t>(0), 32);
+	FBLOG("dsc: off (%s): sink 0x160 = 0x%02x (%s), DSCRM 0x%08x, DSC_TOP 0x%08x, DP_PIXEL_FORMAT 0x%08x, stream "
+	      "0x%08x", why, back, acked ? "acked" : "no ack", regReadDmu(2, dscRm), regReadDmu(2, dscTop),
+	      regReadDmu(2, dpPixelFormat), regReadDmu(2, dpStreamCntl));
+	return true;
 }
 
 // DpTrain on one link of this card: the sink's DPCD over AUX channel `aux`,
@@ -3716,6 +4119,33 @@ static int hdrSysctl SYSCTL_HANDLER_ARGS
 
 SYSCTL_PROC(_debug, OID_AUTO, rdna4_hdr, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, hdrSysctl, "I",
             "AMDRadeonRDNA4: rdna4-hdr: 0 off (default, the plain SDR mode table); 1 the modes' HDR10 variants are offered and their timings carry dynamicRange HDR10, BT2020|BT2100 and 10 bits a component");
+
+// debug.rdna4_dsc: rdna4-dsc at run time. 0 undoes the DSC block and puts the plain stream back (the one-command
+// rollback in docs/dsc-s2.md); 1 retries the enable at the same boot raster. The screen is the judge either way.
+static int dscSysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int value = gDscDevice && gDscDevice->dscEnabled ? 1 : 0;
+	int err = sysctl_handle_int(oidp, &value, 0, req);
+
+	if (err || !req->newptr)
+		return err;
+	if (value < 0 || value > 1)
+		return EINVAL;
+
+	if (!gDscDevice)
+		return 0;
+	if (!value) {
+		if (gDscDevice->dscEnabled || gDscDevice->dscDpPixelFormatBefore != 0xffffffff)
+			(void)gDscDevice->disableDsc("debug.rdna4_dsc = 0");
+	} else if (!gDscDevice->dscEnabled) {
+		(void)gDscDevice->tryEnableDsc();
+	}
+	return 0;
+}
+
+SYSCTL_PROC(_debug, OID_AUTO, rdna4_dsc, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, dscSysctl, "I",
+            "AMDRadeonRDNA4: rdna4-dsc: 0 off (default: the plain stream), 1 DSC on at the boot raster (2 slices x 1920, 8 bpp); reading it says whether DSC is on");
 
 // rdna4-rot180: the plane reads its scanout turned 180 degrees, and every flip keeps the angle and hands the HUBP the address such
 // a read starts at (flip.cpp keeps both per HUBP, so nothing else has to know). The runtime does it when it is up; without one

@@ -47,6 +47,11 @@ dc/dpp/dcn35/dcn35_dpp.c
 dc/dpp/dcn401/dcn401_dpp.c
 dc/dpp/dcn401/dcn401_dpp_cm.c
 dc/dpp/dcn401/dcn401_dpp_dscl.c
+dc/dsc/dc_dsc.c
+dc/dml/dsc/rc_calc_fpu.c
+dc/dsc/rc_calc.c
+dc/dsc/rc_calc_dpi.c
+dc/dsc/dcn20/dcn20_dsc.c
 dc/dsc/dcn401/dcn401_dsc.c
 dc/hubbub/dcn10/dcn10_hubbub.c
 dc/hubbub/dcn20/dcn20_hubbub.c

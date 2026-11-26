@@ -31,6 +31,7 @@
 #include "pipe.hpp"
 #include "pipe2.hpp"
 #include "dptrain.hpp"
+#include "dsc.hpp"
 #include "regsnap.hpp"
 
 class IOMemoryMap;
@@ -287,6 +288,17 @@ public:
 	// the kext holds (dispclkTargetKHz); the boot pixel clock if either is not known. The link is not retrained.
 	uint32_t bootDpMaxKHz();
 	uint32_t bootDpLinkKHz { 0 };   // what the firmware's link carries at 8 bpc, read when the mode table is built
+	// DSC (docs/dsc-s2.md): the sink's capability block decoded, and the one step this driver makes — turn the
+	// compressor on at the boot raster behind rdna4-dsc=1, undoable with debug.rdna4_dsc = 0.
+	bool readSinkDsc();
+	void logSinkDsc(const char *when);
+	bool tryEnableDsc();
+	bool disableDsc(const char *why);
+	Dsc::Caps dscCaps {};
+	bool dscCapsLogged { false };   // the S0 lines are printed once a boot, whichever path reads the block first
+	bool dscEnabled { false };
+	uint32_t dscDpPixelFormatBefore { 0xffffffff };   // DP_PIXEL_FORMAT as it was, to put back when DSC is undone
+	uint32_t dscStreamCntlBefore { 0xffffffff };      // DP_VID_STREAM_CNTL as it was
 	uint32_t dispclkTargetKHz();
 	DpTrain::Result retrainBootLink(const char *why);
 	// rdna4-dcninit=1, a test of lighting the displays when nothing set them up, on a warm card, in a cold start's

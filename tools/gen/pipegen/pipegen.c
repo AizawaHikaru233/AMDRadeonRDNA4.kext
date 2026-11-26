@@ -73,6 +73,8 @@ struct cfg {
 	bool train;    /* the "dplink" scenario: light a DisplayPort stream on a dark pipe, training its link */
 	bool dual;     /* the "dpdual" scenario: an HDMI stream on a DisplayPort connector, through a passive DP++ adapter */
 	bool y420;     /* "y420": the HDMI stream in YCbCr 4:2:0, half the TMDS clock (amdgpu's force_yuv420_output) */
+	bool dsc;      /* "dsc N BPP": the stream is DSC-compressed into N slices at BPP bits a pixel */
+	int dsc_slices, dsc_bpp;
 	int sink_swing, sink_pre;     /* the drive the simulated sink asks for before it reports lock */
 	char sink_kind;               /* its capabilities: sink_reset() */
 	struct dc_crtc_timing t;      /* the new stream */
@@ -271,6 +273,14 @@ bool dm_helpers_dp_write_dpcd(struct dc_context *ctx, const struct dc_link *link
 	return true;
 }
 
+/* amdgpu_dm_helpers.c's, for an SST sink with no dongle (this card's DisplayPort): DP_DSC_ENABLE (DPCD 0x160) =
+ * DP_DECOMPRESSION_EN. What a DSC stream is told before it is unblanked; recorded as the AUX write it is. */
+bool dm_helpers_dp_write_dsc_enable(struct dc_context *ctx, const struct dc_stream_state *stream, bool enable)
+{
+	uint8_t v = enable ? 0x01 : 0x00;
+	return dm_helpers_dp_write_dpcd(ctx, stream->link, 0x160, &v, 1);
+}
+
 void write_scdc_data(struct ddc_service *ddc, uint32_t pix_clk, bool lte_340_scramble)
 {
 	rec_mark("scdc:write_tmds_config", pix_clk > 340000 ? 3 : lte_340_scramble ? 1 : 0);
@@ -356,6 +366,18 @@ static void make_state(const struct cfg *c)
 	stream->ctx = &g_ctx; stream->link = link; stream->sink = sink; stream->signal = signal;
 	stream->timing = c->t;
 	stream->phy_pix_clk = c->t.pix_clk_100hz / 10 / (c->y420 ? 2 : 1);
+	if (c->dsc) {
+		/* What dc_stream's DSC configuration is: the sink's caps already picked the slices and bpp, this is the
+		 * one stream that carries them. The compressor is the one of the pipe's OPP (dcn401_resource.c). */
+		stream->timing.flags.DSC = 1;
+		stream->timing.dsc_cfg.num_slices_h = c->dsc_slices;
+		stream->timing.dsc_cfg.num_slices_v = 1;
+		stream->timing.dsc_cfg.bits_per_pixel = c->dsc_bpp * 16;
+		stream->timing.dsc_cfg.block_pred_enable = true;
+		stream->timing.dsc_cfg.linebuf_depth = 13;
+		stream->timing.dsc_cfg.version_minor = 2;
+		pipe->stream_res.dsc = g_pool.dscs[c->pipe];
+	}
 	stream->src = (struct rect){ 0, 0, w, h }; stream->dst = stream->src;
 	stream->output_color_space = c->y420 ? COLOR_SPACE_YCBCR709 : COLOR_SPACE_SRGB;
 	stream->qs_bit = 1;                      /* send "full range" in the AVI infoframe: a desktop */
@@ -487,6 +509,42 @@ static void sequence(const struct cfg *c)
 	/* dc_commit_state_no_check: dce110_apply_ctx_to_hw for the one new stream ... */
 	rec_mark("begin:stream", 0);
 	if (dce110_apply_single_controller_ctx_to_hw(pipe, g_new, dc) != DC_OK) { fprintf(stderr, "stream failed\n"); exit(1); }
+
+	if (c->dsc) {
+		/* Linux's own DSC chain for a stream that is now lit: link_dpms.c's PPS SDP (the stream encoder sends the
+		 * 128-byte PPS; the DSC block does not), then dcn32_update_dsc_on_stream's block: the DSCCLK DTO, the PPS
+		 * registers, the forward enable and OPTC's three DSC registers. The OPP the compressor feeds is the
+		 * pipe's, as resource assignment leaves it. */
+		struct display_stream_compressor *dsc = pipe->stream_res.dsc;
+		struct dcn401_dsc *dsc401 = TO_DCN401_DSC(dsc);
+		struct dsc_config dsc_cfg = { 0 };
+		struct dsc_optc_config optc = { 0 };
+		struct dccg *dccg = dc->res_pool->dccg;
+
+		dsc_cfg.pic_width = c->t.h_addressable;
+		dsc_cfg.pic_height = c->t.v_addressable;
+		dsc_cfg.pixel_encoding = c->t.pixel_encoding;
+		dsc_cfg.color_depth = c->t.display_color_depth;
+		dsc_cfg.dc_dsc_cfg = pipe->stream->timing.dsc_cfg;
+
+		rec_mark("begin:dsc", 0);
+		/* the compressor has never been enabled: dsc401_enable reads these two and complains if they say an
+		 * OPP other than this pipe's */
+		rec_poke_field(dsc401->dsc_regs->DSC_TOP_CONTROL, dsc401->dsc_mask->DSC_CLOCK_EN, 0);
+		rec_poke_field(dsc401->dsc_regs->DSCRM_DSC_FORWARD_CONFIG,
+			       dsc401->dsc_mask->DSCRM_DSC_FORWARD_EN | dsc401->dsc_mask->DSCRM_DSC_OPP_PIPE_SOURCE, 0);
+		if (!link_set_dsc_pps_packet(pipe, true, false)) { fprintf(stderr, "PPS SDP failed\n"); exit(1); }
+		if (dccg->funcs->set_dto_dscclk)
+			dccg->funcs->set_dto_dscclk(dccg, dsc->inst, dsc_cfg.dc_dsc_cfg.num_slices_h);
+		dsc->funcs->dsc_set_config(dsc, &dsc_cfg, &optc);
+		dsc->funcs->dsc_enable(dsc, pipe->stream_res.opp->inst);
+		pipe->stream_res.tg->funcs->set_dsc_config(pipe->stream_res.tg,
+				optc.is_pixel_format_444 ? OPTC_DSC_ENABLED_444 : OPTC_DSC_ENABLED_NATIVE_SUBSAMPLED,
+				optc.bytes_per_pixel, optc.slice_width);
+		rec_mark("end:dsc", 0);
+		fprintf(stderr, "DSC %d slices x %u, %d bpp, %u bpc: %u bytes a pixel, slice %u px\n", dsc_cfg.dc_dsc_cfg.num_slices_h,
+			optc.slice_width, c->dsc_bpp, 8, optc.bytes_per_pixel, optc.slice_width);
+	}
 
 	/* ... then the planes of the new context under the update lock. dcn401_program_front_end_for_ctx is not
 	 * called whole: it also locks and reprograms every other lit pipe, and this plan leaves those alone. */
@@ -720,6 +778,7 @@ static void setup(void)
 	g_pool.res_cap = &res_cap_dcn4_01; g_pool.funcs = &dcn401_res_pool_funcs;
 	g_pool.pipe_count = 4; g_pool.mpcc_count = 4; g_pool.timing_generator_count = 4;
 	for (int i = 0; i < 4; i++) {
+		g_pool.dscs[i] = dcn401_dsc_create(ctx, i);
 		g_pool.hubps[i] = dcn401_hubp_create(ctx, i);
 		g_pool.dpps[i] = dcn401_dpp_create(ctx, i);
 		g_pool.opps[i] = dcn401_opp_create(ctx, i);
@@ -755,6 +814,10 @@ int main(int argc, char **argv)
 		emit();
 		return 0;
 	}
+	if (argc > 3 && !strcmp(argv[1], "dsc")) {
+		c.dsc = true; c.dsc_slices = atoi(argv[2]); c.dsc_bpp = atoi(argv[3]);
+		argv += 3; argc -= 3;
+	}
 	if (argc > 1 && !strcmp(argv[1], "dp")) { c.dp = true; argv++; argc--; }
 	else if (argc > 1 && !strcmp(argv[1], "dpdual")) { c.dual = true; argv++; argc--; }
 	if (argc > 1 && !strcmp(argv[1], "y420")) { c.y420 = true; argv++; argc--; }
@@ -769,11 +832,13 @@ int main(int argc, char **argv)
 	}
 	verbose = argc > 17;
 	if (argc < 17) {
-		fprintf(stderr, "usage: pipegen [dp | dpdual | dplink K S P] [on W H] pipe dig link hpd  hactive hfront hsync hback  vactive vfront vsync "
+		fprintf(stderr, "usage: pipegen [dsc N BPP] [dp | dpdual | dplink K S P] [on W H] pipe dig link hpd  hactive hfront hsync hback  vactive vfront vsync "
 				"vback  khz hpositive vpositive vic [verbose]\n  hpd counts from 1, as the VBIOS path records do\n"
 				"  dp: the reference for retiming a lit DisplayPort stream instead of the second-pipe plan\n"
 				"  dpdual: an HDMI stream on a DisplayPort connector (a passive DP++ adapter)\n"
 				"  y420: (after dpdual, or alone for HDMI) the HDMI stream in YCbCr 4:2:0\n"
+			"  dsc N BPP: compress the stream into N slices at BPP bits a pixel (RGB, 8 bpc), as Linux's DSC\n"
+			"             code does: PPS SDP, DSCC, DSCRM, OPTC and the DSCCLK DTO\n"
 				"  dplink K S P: light a DisplayPort stream, training its link against a simulated sink of kind\n"
 				"                K (a, b, c) that wants voltage swing S and pre-emphasis P\n"
 				"  on W H: the plane shows the top-left of a W x H surface, as after a mode switch\n");
